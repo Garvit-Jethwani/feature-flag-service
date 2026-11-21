@@ -1,0 +1,58 @@
+# DigitalOcean App Platform spec. See plans/05-deploy-digitalocean.md.
+#
+# This file contains no secrets. __API_KEYS__ is replaced at deploy time with
+# keys generated on the deploying machine; App Platform stores them encrypted.
+name: feature-flag-service
+region: blr
+
+services:
+  - name: api
+    # App Platform clones the public repository and builds the Dockerfile.
+    git:
+      repo_clone_url: https://github.com/Garvit-Jethwani/feature-flag-service.git
+      branch: main
+    dockerfile_path: Dockerfile
+    http_port: 8080
+    # One instance: the evaluation cache and the rate limiter live in the
+    # process, so a second instance would have its own copy of each.
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    health_check:
+      http_path: /healthz
+      initial_delay_seconds: 5
+      period_seconds: 10
+    envs:
+      # Filled in by App Platform from the attached database, TLS required.
+      - key: DATABASE_URL
+        scope: RUN_TIME
+        value: ${db.DATABASE_URL}
+      - key: API_KEYS
+        scope: RUN_TIME
+        type: SECRET
+        value: __API_KEYS__
+      - key: LOG_LEVEL
+        scope: RUN_TIME
+        value: info
+    alerts:
+      - rule: RESTART_COUNT
+        operator: GREATER_THAN
+        value: 3
+        window: FIVE_MINUTES
+      - rule: CPU_UTILIZATION
+        operator: GREATER_THAN
+        value: 80
+        window: FIVE_MINUTES
+      - rule: MEM_UTILIZATION
+        operator: GREATER_THAN
+        value: 80
+        window: FIVE_MINUTES
+
+# An existing Managed PostgreSQL cluster, created before the app.
+databases:
+  - name: db
+    engine: PG
+    production: true
+    cluster_name: feature-flag-service-db
+
+alerts:
+  - rule: DEPLOYMENT_FAILED
