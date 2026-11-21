@@ -2,9 +2,71 @@
 
 How a request moves through the service, and where the cache sits. The reasoning behind the choices is in [`discovery.md`](discovery.md); the rules are in [`../SPECS.md`](../SPECS.md).
 
-## Components
+The diagrams go from the whole system down to one request:
+
+1. [System overview](#system-overview): every component and what it owns
+2. [Data model](#data-model): the tables and how they relate
+3. [Evaluation rules](#evaluation-rules): how one answer is decided
+4. [Evaluation request path](#evaluation-request-path): where the cache sits on a read
+5. [Write path](#write-path): transaction, audit entry, invalidation
+
+## System overview
 
 One Go binary, one PostgreSQL database. The cache lives inside the binary.
+
+```mermaid
+flowchart TB
+    admin["Admin client<br/>API key with role admin"]
+    reader["Application or dashboard<br/>API key with role reader"]
+
+    subgraph app["Go service: one binary, one instance, HTTPS on DigitalOcean App Platform"]
+        direction TB
+        subgraph http["internal/httpapi: HTTP layer"]
+            direction TB
+            mw["Middleware<br/>request ID, JSON access log, metrics, panic recovery"]
+            authn["Auth and rate limit<br/>API key gives actor and role, token bucket per key<br/>401, then 429, then 403"]
+            handlers["Handlers<br/>decode JSON, reject unknown fields, validate<br/>one function maps errors to status codes"]
+            mw --> authn --> handlers
+        end
+        service["internal/service: use cases<br/>validate, call the store, invalidate after commit<br/>cached evaluation"]
+        evaluator["internal/flag: domain, no I/O<br/>types: Flag, Override, Patch, audit actions<br/>validation rules and the pure evaluator"]
+        cache["internal/cache: in memory<br/>key: flag and user, value: result<br/>TTL 60 s, 100,000 entries, generation counter"]
+        store["internal/store: Postgres access<br/>parameterized SQL, transactions, row lock<br/>audit insert, dependency graph check, migrations"]
+
+        handlers --> service
+        service -->|"read: look up, then store the result"| cache
+        service -.->|"write: after commit, drop the flag and its dependents"| cache
+        service -->|"evaluate a snapshot"| evaluator
+        service -->|"read: one snapshot query<br/>write: one transaction"| store
+    end
+
+    subgraph db["PostgreSQL 17: managed, TLS, firewall allows only the app"]
+        direction LR
+        flags[("flags")]
+        overrides[("flag_overrides")]
+        prereqs[("flag_prerequisites")]
+        audit[("audit_log")]
+    end
+
+    admin -->|"POST, PATCH, DELETE flags<br/>PUT, DELETE overrides<br/>GET audit"| mw
+    reader -->|"GET evaluate<br/>GET flags, GET metrics"| mw
+    store --> flags
+    store --> overrides
+    store --> prereqs
+    store --> audit
+```
+
+What is not in the picture because it needs no key and touches no flag: `GET /healthz` (the process is up) and `GET /readyz` (the database is reachable).
+
+State lives in three places:
+
+| State | Where | Lost on restart | Shared between instances |
+|---|---|---|---|
+| Flags, overrides, prerequisites, audit trail | PostgreSQL | No | Yes |
+| Cached evaluation results | Process memory | Yes | No |
+| API keys (hashed), rate limit buckets | Process memory, keys loaded from the environment | Buckets yes, keys reloaded | No |
+
+## Components
 
 | Layer | Package | Job |
 |---|---|---|
@@ -13,6 +75,78 @@ One Go binary, one PostgreSQL database. The cache lives inside the binary.
 | Domain | `internal/flag` | Flag types, validation rules, and the evaluator (a pure function) |
 | Cache | `internal/cache` | In-process cache of evaluation results |
 | Store | `internal/store` | PostgreSQL queries, transactions, migrations |
+
+## Data model
+
+Four tables. The schema is in [`0001_init.sql`](../internal/store/migrations/0001_init.sql) and [`0002_audit.sql`](../internal/store/migrations/0002_audit.sql).
+
+```mermaid
+erDiagram
+    flags ||--o{ flag_overrides : "has, deleted with the flag"
+    flags ||--o{ flag_prerequisites : "requires other flags"
+    flags ||--o{ flag_prerequisites : "is required by, blocks delete"
+    flags ||..o{ audit_log : "history by name, no foreign key"
+
+    flags {
+        text name PK "lowercase, up to 64 chars, never changes"
+        text description "up to 500 chars"
+        boolean enabled "the global toggle"
+        smallint rollout_percentage "0 to 100, default 100"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    flag_overrides {
+        text flag_name PK, FK
+        text user_id PK "opaque, up to 128 chars"
+        boolean enabled "wins over the global toggle"
+        timestamptz updated_at
+    }
+    flag_prerequisites {
+        text flag_name PK, FK "the dependent flag"
+        text requires_flag PK, FK "must be on for the same user"
+    }
+    audit_log {
+        bigint id PK
+        text flag_name "kept after the flag is deleted"
+        text action "flag.created, flag.updated, flag.deleted, override.set, override.removed"
+        text actor "from the API key"
+        jsonb previous_value "the flag before the change"
+        jsonb new_value "the flag after the change"
+        timestamptz occurred_at
+    }
+```
+
+| Table | Design choice | Reason |
+|---|---|---|
+| `flags` | The name is the primary key, and the database repeats the name, length, and range checks | No second identifier to keep in sync; bad data cannot get in even past the API |
+| `flag_overrides` | One row per flag and user; `ON DELETE CASCADE` | Setting an override is an upsert; deleting a flag removes its overrides |
+| `flag_prerequisites` | An edge list; `ON DELETE RESTRICT` on the required flag; index on `requires_flag` | A flag that others require cannot be deleted (`409`); the index finds dependents for cache invalidation |
+| `audit_log` | Insert only; no foreign key; whole flag before and after as JSONB; index on `(flag_name, id DESC)` | History survives deletion; new flag fields need no schema change; "history of one flag, newest first" is one index scan |
+
+There is no users table. A user ID is an opaque string sent by the caller; the service stores it only where a user has an override.
+
+## Evaluation rules
+
+The evaluator is a pure function in [`evaluate.go`](../internal/flag/evaluate.go). Its input is a snapshot: the flag, its prerequisite flags, and this user's overrides. The first rule that matches decides, and the response names it in `reason`.
+
+```mermaid
+flowchart TD
+    start["Evaluate flag F for user U<br/>input: F, its prerequisite flags, U's overrides"] --> exists{"Does F exist?"}
+    exists -->|"no"| nf["404 flag_not_found"]
+    exists -->|"yes"| pre{"Is any prerequisite of F off for U?<br/>each one is evaluated by these same rules"}
+    pre -->|"yes"| r1["off<br/>reason: prerequisite_failed"]
+    pre -->|"no"| ov{"Does U have an override on F?"}
+    ov -->|"yes"| r2["the override's value<br/>reason: user_override"]
+    ov -->|"no"| en{"Is F enabled globally?"}
+    en -->|"no"| r3["off<br/>reason: global_disabled"]
+    en -->|"yes"| ro{"Is rollout_percentage below 100?"}
+    ro -->|"yes"| r4["on if U's bucket is below the percentage<br/>bucket: first 8 bytes of sha256 of F:U, mod 100<br/>reason: rollout"]
+    ro -->|"no"| r5["on<br/>reason: global_enabled"]
+```
+
+- **Override beats the global toggle**: the override is checked before the global toggle, as the spec requires.
+- **Prerequisites come first** and are a hard gate: an override cannot switch on a feature whose base is off.
+- **The bucket is stable**: the same flag and user always give the same number, on any machine. Raising the percentage only adds users. The flag name is in the hash, so different flags select different users.
 
 ## Evaluation request path
 
