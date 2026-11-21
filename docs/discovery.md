@@ -1,6 +1,6 @@
 # Discovery: architecture, approaches, and trade-offs
 
-Status: **Draft, awaiting decisions.** `SPECS.md` says what we are building; this document says how, and why this way rather than another.
+Status: **Decisions accepted by the owner on 21 Nov 2026.** `SPECS.md` says what we are building; this document says how, and why this way rather than another.
 
 The work is split into two stages:
 
@@ -16,9 +16,9 @@ The work is split into two stages:
 - Bearer API keys from the environment identify the caller. The audit actor comes from the key, never from the request body.
 - Locally, Docker Compose runs the API and Postgres. On DigitalOcean, App Platform runs the same image against Managed PostgreSQL.
 
-## 2. Decisions needed
+## 2. Decisions
 
-Recommendations are listed first. Section 4 has the reasoning for each.
+The owner accepted the recommendation for all seven questions below. Section 4 has the reasoning for each.
 
 | # | Question | Recommendation | Main alternative | Section |
 |---|---|---|---|---|

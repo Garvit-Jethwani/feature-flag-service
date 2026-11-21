@@ -1,6 +1,6 @@
 # Feature Flag Service: Specification
 
-Status: **Draft, awaiting review.** Decisions marked *Proposed* in section 5 need a yes or no from the owner.
+Status: **Design decisions accepted by the owner on 21 Nov 2026** (section 5). Details are refined in the phase plans under `plans/`.
 
 ## 1. Objective
 
@@ -57,7 +57,7 @@ Time box: about 3 hours in total, including review. Language: Go.
 4. **Design for the extensions now.** Rollout percentage and prerequisites change the data model and the evaluation order. Including them in the schema and the evaluator from the start avoids rework, even though the endpoints for them land later.
 5. **"Who changed it" needs real identity.** A client-supplied name can be forged, so the audit actor should come from the API key used.
 6. **Keep the dependency count low.** Standard-library HTTP routing and one Postgres driver are enough. Less to review, less to go wrong in three hours.
-7. **Deliberately out of scope:** a UI, multiple environments or projects, multivariate (non-boolean) flags, targeting rules and segments, streaming SDKs, and role-based access beyond API keys.
+7. **Deliberately out of scope:** a UI, multiple environments or projects, multivariate (non-boolean) flags, targeting rules and segments, streaming SDKs, and user accounts or permissions beyond the two API key roles.
 
 ## 5. Decisions
 
@@ -65,13 +65,15 @@ The options, trade-offs, and reasoning behind each decision are in [`docs/discov
 
 | # | Decision | Proposal | Alternative considered | Status |
 |---|---|---|---|---|
-| D1 | Storage | **PostgreSQL**, with SQL migrations embedded in the binary. Run locally through Docker Compose. | SQLite (simpler, but awkward on ephemeral cloud filesystems); in-memory only (not production-ready). | Proposed |
-| D2 | Cache | **In-process cache behind a `Cache` interface**, with per-flag invalidation and a TTL. Redis implementation of the same interface only if time allows. | Redis from the start: correct across multiple instances, but one more service to run, test, and deploy. | Proposed |
-| D3 | Auth and audit actor | **Bearer API keys from environment config**, each mapped to an actor name. All `/v1` endpoints require a key; the actor in the audit log is derived from it. | Trusting an `X-Actor` header (forgeable); full user accounts (too large). | Proposed |
-| D4 | Prerequisites versus overrides | **Prerequisites are a hard gate.** If any prerequisite is off for the user, the flag is off, even with a per-user override of `true`. | Override wins over everything, including prerequisites. | Proposed |
-| D5 | HTTP stack | **Standard library `net/http`** (method and path patterns), `log/slog` for logs, `pgx` for Postgres. | A router framework such as chi or gin. | Proposed |
-| D6 | Flag identity | **The name is the identifier and is immutable.** Lowercase letters, digits, `.`, `_`, `-`; starts with a letter or digit; 1 to 64 characters. | Mixed case (invites `Dark-Mode` versus `dark-mode` confusion); separate numeric IDs. | Proposed |
-| D7 | Deployment target | Decide in the deploy plan. Leaning to **DigitalOcean App Platform** with a managed Postgres dev database, for HTTPS and health checks without server upkeep. | A droplet running Docker Compose. | Open |
+| D1 | Storage | **PostgreSQL**, with SQL migrations embedded in the binary. Run locally through Docker Compose. | SQLite (simpler, but awkward on ephemeral cloud filesystems); in-memory only (not production-ready). | Accepted |
+| D2 | Cache | **In-process cache behind a `Cache` interface**, with per-flag invalidation and a TTL. Redis implementation of the same interface only if time allows. | Redis from the start: correct across multiple instances, but one more service to run, test, and deploy. | Accepted |
+| D3 | Auth and audit actor | **Bearer API keys from environment config**, each mapped to an actor name and a role: `admin` (everything) or `reader` (read and evaluate). All `/v1` endpoints require a key; the actor in the audit log is derived from it. | One key type for everything; trusting an `X-Actor` header (forgeable); full user accounts (too large). | Accepted |
+| D4 | Prerequisites versus overrides | **Prerequisites are a hard gate.** If any prerequisite is off for the user, the flag is off, even with a per-user override of `true`. | Override wins over everything, including prerequisites. | Accepted |
+| D5 | HTTP stack | **Standard library `net/http`** (method and path patterns), `log/slog` for logs, `pgx` for Postgres. | A router framework such as chi or gin. | Assumed (default, no objection raised) |
+| D6 | Flag identity | **The name is the identifier and is immutable.** Lowercase letters, digits, `.`, `_`, `-`; starts with a letter or digit; 1 to 64 characters. | Mixed case (invites `Dark-Mode` versus `dark-mode` confusion); separate numeric IDs. | Assumed (default, no objection raised) |
+| D7 | Deployment target | **DigitalOcean App Platform** with Managed PostgreSQL, one instance, for HTTPS and health checks without server upkeep. | A droplet running Docker Compose (no TLS without a domain). | Accepted |
+| D8 | What the cache holds | **Evaluation results per (flag, user)**, grouped by flag, with a size cap. | Flag snapshots per flag, evaluated on every request. | Accepted |
+| D9 | Integration test database | **Real PostgreSQL**: Docker Compose locally, a service container in CI. | In-memory fake store; Testcontainers. | Accepted |
 
 Risk for D7: `doctl account get` reports the account status as `warning`. This may block resource creation and should be checked in the DigitalOcean console before the deploy phase.
 
@@ -119,7 +121,9 @@ Notes:
 **Known limits, to be stated in the README:**
 
 - With the in-process cache, each instance has its own cache, so a write on one instance is seen by others only after the TTL. A shared Redis cache removes this (D2).
-- A read that started before a write can store a stale result just after the invalidation. The plan for the cache phase will cover a per-flag generation check to close this.
+- Results grow with flags times active users, so the cache has a configurable cap on entries.
+
+**Stale write-back guard:** a read that started before a write could store its old result just after the invalidation. Each invalidation bumps a generation counter, and a read stores its result only if the generation is unchanged since before it queried the database.
 
 Responses carry an `X-Cache: HIT | MISS | BYPASS` header so the behaviour is observable and testable.
 
@@ -146,7 +150,7 @@ flowchart TD
 
 ## 8. API surface (draft)
 
-All routes are under `/v1` and require `Authorization: Bearer <key>`, except the health checks.
+All routes are under `/v1` and require `Authorization: Bearer <key>`, except the health checks. `GET` routes accept either role; every other method requires the `admin` role. Whether `reader` keys may read the audit log is settled in the phase 2 plan.
 
 | Method and path | Purpose | Success | Notable errors |
 |---|---|---|---|
@@ -162,7 +166,7 @@ All routes are under `/v1` and require `Authorization: Bearer <key>`, except the
 | `GET /v1/audit` | All audit entries, newest first | `200` | |
 | `GET /healthz`, `GET /readyz` | Liveness and readiness | `200` | `503` when the database is unreachable |
 
-Errors use one JSON shape: `{"error": {"code": "flag_not_found", "message": "..."}}`. Missing or invalid credentials return `401`.
+Errors use one JSON shape: `{"error": {"code": "flag_not_found", "message": "..."}}`. Missing or invalid credentials return `401`; a valid `reader` key on a write returns `403`.
 
 Evaluation response: `{"flag": "...", "user_id": "...", "enabled": true, "reason": "user_override"}`.
 
