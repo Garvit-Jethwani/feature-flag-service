@@ -336,6 +336,33 @@ flowchart LR
 
 Delivery: GitHub Actions runs the tests on every push. Deployment after a green run is either App Platform's own deploy-on-push or a workflow step that calls `doctl` with a token held as a GitHub secret. The deploy plan picks one. The committed app spec contains no secret values.
 
+### 8.4 Observability and monitoring
+
+Added by the owner as a consideration. Nothing here is committed scope; the decision to implement is taken at the end.
+
+Stage A already provides the base: structured JSON logs carrying a request ID, route, status, duration, and actor; `/healthz` and `/readyz`; and the `X-Cache` header on evaluations.
+
+| Area | Options | Leaning |
+|---|---|---|
+| Application metrics | Prometheus-format `/metrics` endpoint; OpenTelemetry SDK exporting to a collector; standard-library `expvar` | Prometheus format: the most widely supported and one small dependency. It needs something to scrape it, which the plan must name. |
+| Platform metrics | App Platform's built-in CPU, memory, and restart graphs with alert policies | Use as is; no code. |
+| Uptime | DigitalOcean uptime check against `/healthz`, with an alert | Use as is; no code. |
+| Logs | App Platform runtime logs; forwarding to an external log service for search and retention | Runtime logs now; forwarding only if retention matters. |
+| Tracing | OpenTelemetry traces across HTTP and database calls | Skip: one service and one database gain little from tracing. |
+
+Signals worth having:
+
+| Signal | Why |
+|---|---|
+| Request rate, error rate, and latency per route | The basic health of the API. |
+| Evaluations by reason code | Shows how flags are actually being decided. |
+| Cache hits, misses, bypasses, entries, evictions, invalidations | Proves the cache works and shows when the size cap is too small. |
+| Database pool in use and wait time | Early warning before evaluations slow down. |
+| `401` and `403` counts | Key misuse or probing. |
+| Readiness failures | The database is unreachable. |
+
+Constraints if this is built: `/metrics` must not be public, and flag names and user IDs must never be metric labels, for both privacy and label-count reasons. DigitalOcean's exact monitoring features are to be confirmed in the plan before relying on them.
+
 ## 9. Phase plan
 
 Every phase starts with a plan in `plans/` that is approved before work begins.
@@ -347,8 +374,9 @@ Every phase starts with a plan in `plans/` that is approved before work begins.
 | A | 3. Quality and docs | HTTP integration tests, GitHub Actions, Dockerfile hardening, README, final architecture diagram | CI is green on push; README covers setup, rules, and caching | 20 min |
 | B | 4. Extensions | Rollout percentage and prerequisites exposed through the API, with tests | Rollout is deterministic; cycles are rejected; dependents are invalidated | 20 min |
 | B | 5. Deployment | App spec, managed database, secrets, deploy, smoke test, teardown notes | The public URL answers `/healthz` and an authenticated evaluation | 15 min |
+| B | 6. Observability (optional) | Metrics endpoint, uptime check, alerts (8.4) | Cache hit ratio and request latency are visible | only if time remains |
 
-The schema and the evaluator include rollout and prerequisites from phase 1, so phase 4 adds endpoints and tests rather than reshaping the core. If time runs short, phase 5 is dropped first.
+The schema and the evaluator include rollout and prerequisites from phase 1, so phase 4 adds endpoints and tests rather than reshaping the core. Phase 6 is attempted only if time remains; before that, if time runs short, phase 5 is dropped first.
 
 ## 10. Risks and open points
 
