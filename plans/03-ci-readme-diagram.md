@@ -32,6 +32,8 @@ Covers E1 (architecture diagram), E4 (CI), and E5 (README) from `SPECS.md`. E3 (
 2. The GitHub Actions run for the pushed commit is green, and its log shows the database-backed tests ran (not skipped).
 3. The Mermaid diagrams render on GitHub.
 
+Result: 1 and 2 passed (CI ran 173 test cases, none skipped). 3 is **not checked**: the agent's browser is not allowed to open github.com, so the owner needs to look at `docs/architecture.md` on GitHub once.
+
 ## Commits
 
 1. `docs: add plan 03`
