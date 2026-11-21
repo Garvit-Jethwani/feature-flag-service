@@ -145,21 +145,25 @@ func decodeError(err error) error {
 }
 
 // createFlag handles POST /v1/flags. A new flag is disabled unless the body
-// sets "enabled": true. The actor is taken from the API key, not the body.
+// sets "enabled": true, and is rolled out to 100% of users unless the body
+// sets "rollout_percentage". The actor is taken from the API key, not the
+// body.
 func (a *api) createFlag(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Enabled     bool   `json:"enabled"`
+		Name              string `json:"name"`
+		Description       string `json:"description"`
+		Enabled           bool   `json:"enabled"`
+		RolloutPercentage *int   `json:"rollout_percentage"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		a.fail(w, r, err)
 		return
 	}
 	f, err := a.svc.CreateFlag(r.Context(), principalFrom(r.Context()).Actor, service.CreateInput{
-		Name:        body.Name,
-		Description: body.Description,
-		Enabled:     body.Enabled,
+		Name:              body.Name,
+		Description:       body.Description,
+		Enabled:           body.Enabled,
+		RolloutPercentage: body.RolloutPercentage,
 	})
 	if err != nil {
 		a.fail(w, r, err)
@@ -211,19 +215,25 @@ func (a *api) getFlag(w http.ResponseWriter, r *http.Request) {
 }
 
 // updateFlag handles PATCH /v1/flags/{name}. Only the fields present in the
-// body change; this is how a flag is toggled globally.
+// body change; this is how a flag is toggled globally, rolled out to a
+// percentage of users, or made to depend on other flags. "prerequisites"
+// replaces the whole list.
 func (a *api) updateFlag(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Description *string `json:"description"`
-		Enabled     *bool   `json:"enabled"`
+		Description       *string   `json:"description"`
+		Enabled           *bool     `json:"enabled"`
+		RolloutPercentage *int      `json:"rollout_percentage"`
+		Prerequisites     *[]string `json:"prerequisites"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		a.fail(w, r, err)
 		return
 	}
 	f, err := a.svc.UpdateFlag(r.Context(), principalFrom(r.Context()).Actor, r.PathValue("name"), flag.Patch{
-		Description: body.Description,
-		Enabled:     body.Enabled,
+		Description:       body.Description,
+		Enabled:           body.Enabled,
+		RolloutPercentage: body.RolloutPercentage,
+		Prerequisites:     body.Prerequisites,
 	})
 	if err != nil {
 		a.fail(w, r, err)

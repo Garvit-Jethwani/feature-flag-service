@@ -17,7 +17,7 @@ const actor = "tester"
 
 func mustCreate(t *testing.T, s *store.Store, name string, enabled bool) {
 	t.Helper()
-	if _, err := s.CreateFlag(context.Background(), actor, name, "", enabled); err != nil {
+	if _, err := s.CreateFlag(context.Background(), actor, name, "", enabled, 100); err != nil {
 		t.Fatalf("CreateFlag(%q): %v", name, err)
 	}
 }
@@ -53,14 +53,14 @@ func TestCreateUpdateDelete(t *testing.T) {
 	ctx := context.Background()
 	s := store.New(storetest.NewPool(t))
 
-	f, err := s.CreateFlag(ctx, actor, "f", "original", false)
+	f, err := s.CreateFlag(ctx, actor, "f", "original", false, 100)
 	if err != nil {
 		t.Fatalf("CreateFlag: %v", err)
 	}
 	if f.Enabled || f.RolloutPercentage != 100 || len(f.Prerequisites) != 0 {
 		t.Errorf("unexpected defaults: %+v", f)
 	}
-	if _, err := s.CreateFlag(ctx, actor, "f", "", true); !errors.Is(err, flag.ErrAlreadyExists) {
+	if _, err := s.CreateFlag(ctx, actor, "f", "", true, 100); !errors.Is(err, flag.ErrAlreadyExists) {
 		t.Errorf("duplicate CreateFlag error = %v, want ErrAlreadyExists", err)
 	}
 

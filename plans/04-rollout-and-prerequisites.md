@@ -1,6 +1,8 @@
 # Plan 04: Percentage rollout and flag dependencies through the API
 
-Status: Draft. Waiting for the owner's approval.
+Status: Implemented. Approved by the owner on 21 Nov 2026 ("go with phase 4").
+
+Deviation from the test list below: a third small HTTP test was added for the depth limit, because that rule has an off-by-one risk (ten levels allowed, the eleventh refused, at either end of the chain).
 
 Covers X2 (percentage rollout) and X3 (flag dependencies) from `SPECS.md`. The evaluator, the database columns, the evaluation query, and cache invalidation of dependent flags already support both (plans 01 and 02). What is missing is a way to set them. Budget: 12 minutes.
 

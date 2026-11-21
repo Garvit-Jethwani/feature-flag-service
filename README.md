@@ -70,10 +70,10 @@ All `/v1` routes need `Authorization: Bearer <key>`. Bodies are JSON.
 
 | Method and path | Role | Purpose | Success | Errors |
 |---|---|---|---|---|
-| `POST /v1/flags` | admin | Create a flag (`name`, `description`, `enabled`) | `201` | `400`, `409` name exists |
+| `POST /v1/flags` | admin | Create a flag (`name`, `description`, `enabled`, `rollout_percentage`) | `201` | `400`, `409` name exists |
 | `GET /v1/flags` | reader | List flags by name; page with `limit` and `after` | `200` | `400` |
 | `GET /v1/flags/{name}` | reader | One flag with its per-user overrides | `200` | `404` |
-| `PATCH /v1/flags/{name}` | admin | Change `description` and/or `enabled` | `200` | `400`, `404` |
+| `PATCH /v1/flags/{name}` | admin | Change any of `description`, `enabled`, `rollout_percentage`, `prerequisites` | `200` | `400`, `404`, `409` dependency cycle or chain too deep |
 | `DELETE /v1/flags/{name}` | admin | Delete a flag and its overrides | `204` | `404`, `409` other flags depend on it |
 | `PUT /v1/flags/{name}/overrides/{userID}` | admin | Set a per-user override (`enabled`) | `200` | `400`, `404` |
 | `DELETE /v1/flags/{name}/overrides/{userID}` | admin | Remove a per-user override | `204` | `404` |
@@ -97,6 +97,8 @@ Errors always have the same shape, and a missing flag is `404`, never `500`:
 | Flag name | `^[a-z0-9][a-z0-9._-]{0,63}$`: lowercase letters, digits, `.`, `_`, `-`; no spaces; 1 to 64 characters. The name is the identifier and cannot be changed. |
 | Description | At most 500 characters |
 | User ID | 1 to 128 characters, no whitespace or control characters |
+| Rollout percentage | Whole number from 0 to 100 |
+| Prerequisites | At most 10 existing flags, no repeats, not the flag itself, no cycles, chains at most 10 levels deep |
 | Request body | `Content-Type: application/json`, at most 1 MB, unknown fields rejected |
 
 ## Evaluation rules
@@ -115,7 +117,28 @@ Checked in this order; the first rule that matches decides. The response's `reas
 - **A prerequisite is a hard gate.** If a required flag is off for the user, this flag is off even with an override of `true`.
 - **Rollout is deterministic.** The user's bucket is `sha256(flagName + ":" + userID)` reduced to 0 to 99. The same user always gets the same answer, different flags pick different users, and raising the percentage only adds users.
 
-Rules 1 and 4 are implemented and unit-tested in the evaluator (`internal/flag/evaluate.go`), but the API cannot set prerequisites or a rollout percentage yet; that is plan 04. Until then every flag is at 100% with no prerequisites.
+### Percentage rollout
+
+```sh
+# Enable for 25% of users.
+curl -s -X PATCH $B/v1/flags/new-checkout -H "Authorization: Bearer $ADMIN" \
+  -H 'Content-Type: application/json' -d '{"enabled":true,"rollout_percentage":25}'
+```
+
+A flag must be enabled for its rollout to matter: a disabled flag is off for everyone without an override, whatever the percentage.
+
+### Flag dependencies
+
+```sh
+# new-checkout is on for a user only if payments-v2 is on for that user too.
+curl -s -X PATCH $B/v1/flags/new-checkout -H "Authorization: Bearer $ADMIN" \
+  -H 'Content-Type: application/json' -d '{"prerequisites":["payments-v2"]}'
+```
+
+- `prerequisites` replaces the whole list; `[]` removes every dependency.
+- A change that would make a flag require itself, directly or through other flags, is rejected with `409 dependency_cycle`. A chain longer than 10 levels is rejected with `409 dependency_too_deep`.
+- A flag that others require cannot be deleted (`409 flag_has_dependents`) until those dependencies are removed.
+- Changing a flag also drops the cached results of every flag that depends on it.
 
 The evaluator is a pure function: flag data in, answer out, no database or cache. That is why its rules can be tested without any infrastructure.
 

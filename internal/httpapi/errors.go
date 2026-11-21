@@ -51,6 +51,13 @@ func classify(err error) (status int, code, message string) {
 		return http.StatusConflict, "flag_exists", "a flag with this name already exists"
 	case errors.Is(err, flag.ErrHasDependents):
 		return http.StatusConflict, "flag_has_dependents", "other flags require this flag; remove those dependencies first"
+	case errors.Is(err, flag.ErrDependencyCycle):
+		return http.StatusConflict, "dependency_cycle", "this change would make a flag require itself, directly or through other flags"
+	case errors.Is(err, flag.ErrDependencyTooDeep), errors.Is(err, flag.ErrPrerequisiteDepth):
+		// The first is raised when a change is rejected. The second is the
+		// evaluator's own guard; it should be unreachable, but if it ever
+		// fires it is a state problem, not a server crash.
+		return http.StatusConflict, "dependency_too_deep", "the chain of prerequisite flags is longer than 10 levels"
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable, "timeout", "the request took too long; try again"
 	default:

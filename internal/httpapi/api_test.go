@@ -304,7 +304,8 @@ func TestErrorResponses(t *testing.T) {
 
 		// Body handling.
 		{"unknown field", "POST", "/v1/flags", object("name", "ok", "owner", "me"), 400, "invalid_request"},
-		{"rollout not accepted yet", "POST", "/v1/flags", object("name", "ok", "rollout_percentage", 50), 400, "invalid_request"},
+		{"rollout out of range", "POST", "/v1/flags", object("name", "ok", "rollout_percentage", 150), 400, "invalid_argument"},
+		{"prerequisites not accepted on create", "POST", "/v1/flags", object("name", "ok", "prerequisites", []string{"existing"}), 400, "invalid_request"},
 		{"client-supplied actor rejected", "PATCH", "/v1/flags/existing", object("enabled", false, "actor", "mallory"), 400, "invalid_request"},
 		{"malformed JSON", "POST", "/v1/flags", `{"name": `, 400, "invalid_request"},
 		{"empty body", "POST", "/v1/flags", ``, 400, "invalid_request"},

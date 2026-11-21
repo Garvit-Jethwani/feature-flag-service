@@ -119,15 +119,15 @@ func affectedFlags(ctx context.Context, q querier, name string) ([]string, error
 // CreateFlag inserts a flag and its audit entry. It returns
 // flag.ErrAlreadyExists if the name is taken. Nothing needs invalidating:
 // no result is ever cached for a flag that does not exist.
-func (s *Store) CreateFlag(ctx context.Context, actor, name, description string, enabled bool) (flag.Flag, error) {
+func (s *Store) CreateFlag(ctx context.Context, actor, name, description string, enabled bool, rolloutPercentage int) (flag.Flag, error) {
 	const query = `
-		INSERT INTO flags AS f (name, description, enabled)
-		VALUES ($1, $2, $3)
+		INSERT INTO flags AS f (name, description, enabled, rollout_percentage)
+		VALUES ($1, $2, $3, $4)
 		RETURNING ` + flagColumns
 
 	var created flag.Flag
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		f, err := scanFlag(tx.QueryRow(ctx, query, name, description, enabled))
+		f, err := scanFlag(tx.QueryRow(ctx, query, name, description, enabled, rolloutPercentage))
 		if hasCode(err, pgUniqueViolation) {
 			return flag.ErrAlreadyExists
 		}
@@ -210,34 +210,56 @@ func (s *Store) ListFlags(ctx context.Context, after string, limit int) ([]flag.
 // If the patch would change nothing, the flag is returned as it is, no audit
 // entry is written, and no flags are reported for invalidation: the audit
 // trail records state changes, and there was none. It returns
-// flag.ErrNotFound if the flag does not exist.
+// flag.ErrNotFound if the flag does not exist. A prerequisite change can
+// also fail with a validation error (a required flag does not exist),
+// flag.ErrDependencyCycle, or flag.ErrDependencyTooDeep; nothing is saved
+// in those cases.
 func (s *Store) UpdateFlag(ctx context.Context, actor, name string, patch flag.Patch) (flag.Flag, []string, error) {
 	const query = `
 		UPDATE flags AS f
-		SET description = $2, enabled = $3, updated_at = now()
+		SET description = $2, enabled = $3, rollout_percentage = $4, updated_at = now()
 		WHERE f.name = $1
 		RETURNING ` + flagColumns
 
 	var updated flag.Flag
 	var affected []string
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// Taken before the row lock so that two dependency edits never
+		// wait on each other's rows; see lockDependencyEdits.
+		if patch.Prerequisites != nil {
+			if err := lockDependencyEdits(ctx, tx); err != nil {
+				return err
+			}
+		}
 		previous, err := lockFlag(ctx, tx, name)
 		if err != nil {
 			return err
 		}
 
 		// Work out the values after the patch; a nil field keeps its value.
-		description, enabled := previous.Description, previous.Enabled
+		description, enabled, rollout := previous.Description, previous.Enabled, previous.RolloutPercentage
 		if patch.Description != nil {
 			description = *patch.Description
 		}
 		if patch.Enabled != nil {
 			enabled = *patch.Enabled
 		}
+		if patch.RolloutPercentage != nil {
+			rollout = *patch.RolloutPercentage
+		}
+		prerequisitesChange := patch.Prerequisites != nil && !sameNames(previous.Prerequisites, *patch.Prerequisites)
 
 		updated = previous
-		if description != previous.Description || enabled != previous.Enabled {
-			updated, err = scanFlag(tx.QueryRow(ctx, query, name, description, enabled))
+		if description != previous.Description || enabled != previous.Enabled ||
+			rollout != previous.RolloutPercentage || prerequisitesChange {
+			// Prerequisites are written first so that the UPDATE below
+			// returns the flag with its new list.
+			if prerequisitesChange {
+				if err := replacePrerequisites(ctx, tx, name, *patch.Prerequisites); err != nil {
+					return err
+				}
+			}
+			updated, err = scanFlag(tx.QueryRow(ctx, query, name, description, enabled, rollout))
 			if err != nil {
 				return fmt.Errorf("update flag: %w", err)
 			}

@@ -144,7 +144,7 @@ All routes are under `/v1` and require `Authorization: Bearer <key>`, except the
 | `POST /v1/flags` | Create a flag | `201` | `400` invalid, `409` name exists |
 | `GET /v1/flags` | List flags | `200` | |
 | `GET /v1/flags/{name}` | Read a flag with its overrides and prerequisites | `200` | `404` |
-| `PATCH /v1/flags/{name}` | Update description, enabled state, rollout percentage, prerequisites | `200` | `400`, `404`, `409` dependency cycle |
+| `PATCH /v1/flags/{name}` | Update description, enabled state, rollout percentage, prerequisites | `200` | `400`, `404`, `409` dependency cycle or chain too deep |
 | `DELETE /v1/flags/{name}` | Delete a flag | `204` | `404`, `409` other flags depend on it |
 | `PUT /v1/flags/{name}/overrides/{userID}` | Set a per-user override | `200` | `400`, `404` |
 | `DELETE /v1/flags/{name}/overrides/{userID}` | Remove a per-user override | `204` | `404` |
@@ -165,6 +165,7 @@ Evaluation response: `{"flag": "...", "user_id": "...", "enabled": true, "reason
 | Description | At most 500 characters |
 | User ID | 1 to 128 characters, no whitespace or control characters |
 | Rollout percentage | Integer from 0 to 100 |
+| Prerequisites | At most 10 per flag; each an existing flag, no repeats, not the flag itself. The list is replaced as a whole through `PATCH`. A cycle is `409 dependency_cycle`; a chain longer than 10 levels is `409 dependency_too_deep`. |
 | Request body | JSON only, at most 1 MB, unknown fields rejected |
 
 ## 10. Data model (draft)
@@ -197,7 +198,7 @@ Each phase gets a plan in `plans/` that must be approved before work starts.
 | 1 | Domain model, evaluator with unit tests, Postgres store, flag CRUD, overrides, evaluation endpoint, validation, auth | F1, F2, F3 (uncached), E2, E3 (unit) | done |
 | 2 | Cache with invalidation, audit trail, per-key rate limiting | F3, F4, X5 | done |
 | 3 | HTTP integration tests, GitHub Actions, Dockerfile, README, architecture diagram | E1, E3, E4, E5 | done |
-| 4 | Percentage rollout and flag dependencies exposed through the API | X2, X3 | 20 min |
+| 4 | Percentage rollout and flag dependencies exposed through the API | X2, X3 | done |
 | 5 | Deployment to DigitalOcean | X1 | 15 min |
 | 6 | Observability and monitoring (optional) | X4 | only if time remains |
 

@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"net/http"
 	"testing"
 )
@@ -90,11 +89,7 @@ func TestDependentFlagIsInvalidated(t *testing.T) {
 	s := newDatabaseServer(t)
 	s.mustCreate("base", true)
 	s.mustCreate("feature", true)
-	// The API does not expose prerequisites yet, so write the row directly.
-	const query = `INSERT INTO flag_prerequisites (flag_name, requires_flag) VALUES ('feature', 'base')`
-	if _, err := s.pool.Exec(context.Background(), query); err != nil {
-		t.Fatalf("insert prerequisite: %v", err)
-	}
+	s.mustPatch("feature", map[string]any{"prerequisites": []string{"base"}})
 
 	s.wantCached("before the change", "feature", "u1", true, "MISS")
 	s.wantCached("before the change, cached", "feature", "u1", true, "HIT")

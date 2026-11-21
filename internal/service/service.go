@@ -27,7 +27,7 @@ const (
 // for the audit trail and return the names of the flags whose cached
 // evaluation results are out of date after the write.
 type Store interface {
-	CreateFlag(ctx context.Context, actor, name, description string, enabled bool) (flag.Flag, error)
+	CreateFlag(ctx context.Context, actor, name, description string, enabled bool, rolloutPercentage int) (flag.Flag, error)
 	GetFlag(ctx context.Context, name string) (flag.Flag, error)
 	ListFlags(ctx context.Context, after string, limit int) ([]flag.Flag, error)
 	UpdateFlag(ctx context.Context, actor, name string, patch flag.Patch) (flag.Flag, []string, error)
@@ -82,6 +82,8 @@ type CreateInput struct {
 	Name        string
 	Description string
 	Enabled     bool
+	// RolloutPercentage is optional; nil means 100 (everyone).
+	RolloutPercentage *int
 }
 
 // Evaluation is the result of evaluating a flag for a user.
@@ -110,7 +112,14 @@ func (s *Service) CreateFlag(ctx context.Context, actor string, in CreateInput) 
 	if err := flag.ValidateDescription(in.Description); err != nil {
 		return flag.Flag{}, err
 	}
-	f, err := s.store.CreateFlag(ctx, actor, in.Name, in.Description, in.Enabled)
+	rollout := 100
+	if in.RolloutPercentage != nil {
+		rollout = *in.RolloutPercentage
+	}
+	if err := flag.ValidateRolloutPercentage(rollout); err != nil {
+		return flag.Flag{}, err
+	}
+	f, err := s.store.CreateFlag(ctx, actor, in.Name, in.Description, in.Enabled, rollout)
 	if err != nil {
 		return flag.Flag{}, err
 	}
@@ -150,10 +159,20 @@ func (s *Service) UpdateFlag(ctx context.Context, actor, name string, patch flag
 		return flag.Flag{}, err
 	}
 	if patch.IsEmpty() {
-		return flag.Flag{}, &flag.ValidationError{Field: "body", Message: "must set at least one of description or enabled"}
+		return flag.Flag{}, &flag.ValidationError{Field: "body", Message: "must set at least one of description, enabled, rollout_percentage, or prerequisites"}
 	}
 	if patch.Description != nil {
 		if err := flag.ValidateDescription(*patch.Description); err != nil {
+			return flag.Flag{}, err
+		}
+	}
+	if patch.RolloutPercentage != nil {
+		if err := flag.ValidateRolloutPercentage(*patch.RolloutPercentage); err != nil {
+			return flag.Flag{}, err
+		}
+	}
+	if patch.Prerequisites != nil {
+		if err := flag.ValidatePrerequisites(name, *patch.Prerequisites); err != nil {
 			return flag.Flag{}, err
 		}
 	}

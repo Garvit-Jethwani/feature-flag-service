@@ -51,13 +51,17 @@ type Override struct {
 
 // Patch is a partial update. A nil field is left unchanged.
 type Patch struct {
-	Description *string
-	Enabled     *bool
+	Description       *string
+	Enabled           *bool
+	RolloutPercentage *int
+	// Prerequisites, when set, replaces the whole list. An empty list
+	// removes every prerequisite.
+	Prerequisites *[]string
 }
 
 // IsEmpty reports whether the patch changes nothing.
 func (p Patch) IsEmpty() bool {
-	return p.Description == nil && p.Enabled == nil
+	return p.Description == nil && p.Enabled == nil && p.RolloutPercentage == nil && p.Prerequisites == nil
 }
 
 // Domain errors. The HTTP layer maps these to status codes in one place.
@@ -66,7 +70,48 @@ var (
 	ErrAlreadyExists    = errors.New("flag already exists")
 	ErrOverrideNotFound = errors.New("override not found")
 	ErrHasDependents    = errors.New("flag is required by other flags")
+	// ErrDependencyCycle means a prerequisite change would make a flag
+	// require itself, directly or through other flags.
+	ErrDependencyCycle = errors.New("prerequisites would form a cycle")
+	// ErrDependencyTooDeep means a prerequisite change would make a chain
+	// longer than the evaluator follows (MaxPrerequisiteDepth).
+	ErrDependencyTooDeep = errors.New("prerequisite chain would be too deep")
 )
+
+// MaxPrerequisites is the most flags one flag may require directly.
+const MaxPrerequisites = 10
+
+// ValidateRolloutPercentage checks that a rollout percentage is 0 to 100.
+func ValidateRolloutPercentage(percentage int) error {
+	if percentage < 0 || percentage > 100 {
+		return invalid("rollout_percentage", "must be a whole number from 0 to 100")
+	}
+	return nil
+}
+
+// ValidatePrerequisites checks the list of flags that the flag called name
+// would require: valid names, no repeats, not the flag itself, and not too
+// many. Whether those flags exist, and whether the change would create a
+// cycle, can only be checked against the database; the store does that.
+func ValidatePrerequisites(name string, prerequisites []string) error {
+	if len(prerequisites) > MaxPrerequisites {
+		return invalid("prerequisites", "must list at most %d flags", MaxPrerequisites)
+	}
+	seen := map[string]bool{}
+	for _, prerequisite := range prerequisites {
+		if err := validateName("prerequisites", prerequisite); err != nil {
+			return err
+		}
+		if prerequisite == name {
+			return invalid("prerequisites", "a flag cannot require itself")
+		}
+		if seen[prerequisite] {
+			return invalid("prerequisites", "must not list the same flag twice")
+		}
+		seen[prerequisite] = true
+	}
+	return nil
+}
 
 // ValidationError reports a rejected input field.
 type ValidationError struct {
