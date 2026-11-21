@@ -11,6 +11,9 @@ Written in Go with the standard library HTTP server and PostgreSQL. The only thi
 | [`SPECS.md`](SPECS.md) | Requirements, decisions, rules. The source of truth. |
 | [`docs/architecture.md`](docs/architecture.md) | Diagrams of the evaluation and write paths; where the cache sits. |
 | [`docs/discovery.md`](docs/discovery.md) | Options considered and trade-offs. |
+| [`docs/cujs.md`](docs/cujs.md) | User journeys, and how the service handles each case internally. |
+| [`docs/local-walkthrough.md`](docs/local-walkthrough.md) | Every feature exercised with `curl` on one machine, with real output. |
+| [`docs/live-walkthrough.md`](docs/live-walkthrough.md) | What is deployed on DigitalOcean, and the same checks against it. |
 | [`docs/next-steps.md`](docs/next-steps.md) | Observability, and what to improve next. |
 | [`plans/`](plans) | One plan per phase, approved before it was built. |
 
