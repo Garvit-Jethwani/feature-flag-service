@@ -363,6 +363,22 @@ Signals worth having:
 
 Constraints if this is built: `/metrics` must not be public, and flag names and user IDs must never be metric labels, for both privacy and label-count reasons. DigitalOcean's exact monitoring features are to be confirmed in the plan before relying on them.
 
+### 8.5 Rate limiting
+
+Raised by the owner. The problem statement does not ask for it, so it is not needed for the required scope; it is a production-hardening extra, decided at the end.
+
+What already limits abuse without it: every `/v1` route needs a key, bodies are capped at 1 MB, each request has a 5-second timeout, the database pool has a fixed size, and most evaluations are answered from the cache without touching the database.
+
+What it would add: one misbehaving client (a retry loop, or constant `Cache-Control: no-cache`) could no longer take most of the database pool from everyone else.
+
+| Option | For | Against |
+|---|---|---|
+| **In-process token bucket per API key** (leaning, if built) | About 50 lines with the standard library. Answers `429` with `Retry-After`. Fair between clients. | Limits are per instance, the same caveat as the in-process cache. |
+| At the edge (a proxy or CDN in front of the service) | Stops traffic before it reaches the app; one limit across instances. | Another component to set up and pay for. |
+| Shared limiter in Redis or Valkey | Exact limits across instances. | Needs the shared cache we chose not to run yet. |
+
+Slowing down key guessing is not a reason to add it: tokens must be at least 32 characters and are meant to be randomly generated (`make env` does this), which puts them far beyond guessing range.
+
 ## 9. Phase plan
 
 Every phase starts with a plan in `plans/` that is approved before work begins.
@@ -374,7 +390,7 @@ Every phase starts with a plan in `plans/` that is approved before work begins.
 | A | 3. Quality and docs | HTTP integration tests, GitHub Actions, Dockerfile hardening, README, final architecture diagram | CI is green on push; README covers setup, rules, and caching | 20 min |
 | B | 4. Extensions | Rollout percentage and prerequisites exposed through the API, with tests | Rollout is deterministic; cycles are rejected; dependents are invalidated | 20 min |
 | B | 5. Deployment | App spec, managed database, secrets, deploy, smoke test, teardown notes | The public URL answers `/healthz` and an authenticated evaluation | 15 min |
-| B | 6. Observability (optional) | Metrics endpoint, uptime check, alerts (8.4) | Cache hit ratio and request latency are visible | only if time remains |
+| B | 6. Observability and rate limiting (optional) | Metrics endpoint, uptime check, alerts (8.4); per-key rate limit (8.5) | Cache hit ratio and request latency are visible; excess requests get `429` | only if time remains |
 
 The schema and the evaluator include rollout and prerequisites from phase 1, so phase 4 adds endpoints and tests rather than reshaping the core. Phase 6 is attempted only if time remains; before that, if time runs short, phase 5 is dropped first.
 

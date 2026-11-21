@@ -42,7 +42,8 @@ This repository is **public**. Treat everything committed as published.
 - Pass `context.Context` through every request path. Wrap errors with `%w`. No panics in request handling.
 - Domain errors map to HTTP status codes in one place. A missing flag is `404`, never `500`.
 - Keep evaluation logic a pure function so it can be unit-tested without a database or cache.
-- Tests accompany the code they cover, in the same commit.
+- Tests accompany the code they cover, in the same commit. Keep them focused: cover the behaviours the spec names and the risky paths (cache invalidation, audit, auth, error codes). Do not write exhaustive tables for their own sake.
+- Comment the code so the owner can read it and explain it. Every package, type, and function gets a short comment saying what it does; any non-obvious block also says why. Plain words, no restating the code line by line.
 
 ## Git
 

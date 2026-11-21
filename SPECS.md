@@ -42,6 +42,7 @@ Time box: about 3 hours in total, including review. Language: Go.
 | X2 | **Percentage rollout.** Enable a flag for a percentage of users using a deterministic hash of the user ID. |
 | X3 | **Flag dependencies.** A flag can require another flag to be enabled before it evaluates to true. |
 | X4 | **Observability and monitoring.** Metrics, logs, and alerting for the running service. Added by the owner as a consideration, not part of the original problem statement; whether to implement it is decided at the end. Options are in `docs/discovery.md` section 8.4. |
+| X5 | **Rate limiting.** Limit requests per API key and answer `429` when exceeded. Raised by the owner; not part of the original problem statement and not needed for the required scope. Decided at the end; options are in `docs/discovery.md` section 8.5. |
 
 ## 3. Owner's take
 
@@ -213,6 +214,6 @@ Each phase gets a plan in `plans/` that must be approved before work starts.
 | 3 | HTTP integration tests, GitHub Actions, Dockerfile, README, architecture diagram | E1, E3, E4, E5 | 20 min |
 | 4 | Percentage rollout and flag dependencies exposed through the API | X2, X3 | 20 min |
 | 5 | Deployment to DigitalOcean | X1 | 15 min |
-| 6 | Observability and monitoring (optional) | X4 | only if time remains |
+| 6 | Observability, monitoring, and rate limiting (optional) | X4, X5 | only if time remains |
 
 Phases 1 to 3 are the required scope and take priority. Phases 4 to 6 are extensions. Phase 6 is attempted only if time remains after the others; if time runs short before that, phase 5 (deployment) is dropped first.

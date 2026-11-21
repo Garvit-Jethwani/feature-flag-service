@@ -46,6 +46,7 @@ func (s *Store) Ping(ctx context.Context) error {
 	return nil
 }
 
+// scanFlag reads one row selected with flagColumns into a Flag.
 func scanFlag(row pgx.Row) (flag.Flag, error) {
 	var f flag.Flag
 	err := row.Scan(&f.Name, &f.Description, &f.Enabled, &f.RolloutPercentage,
@@ -53,6 +54,8 @@ func scanFlag(row pgx.Row) (flag.Flag, error) {
 	return f, err
 }
 
+// hasCode reports whether err is a Postgres error with the given code, such
+// as a unique or foreign key violation.
 func hasCode(err error, code string) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == code
@@ -92,6 +95,7 @@ func (s *Store) GetFlag(ctx context.Context, name string) (flag.Flag, error) {
 	return f, nil
 }
 
+// listOverrides returns every per-user override of a flag, ordered by user.
 func (s *Store) listOverrides(ctx context.Context, name string) ([]flag.Override, error) {
 	const query = `
 		SELECT user_id, enabled, updated_at

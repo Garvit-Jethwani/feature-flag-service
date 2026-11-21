@@ -53,6 +53,7 @@ type evaluationBody struct {
 	Reason  string `json:"reason"`
 }
 
+// toSummary converts a domain flag to its JSON shape without overrides.
 func toSummary(f flag.Flag) flagSummary {
 	prerequisites := f.Prerequisites
 	if prerequisites == nil {
@@ -69,10 +70,12 @@ func toSummary(f flag.Flag) flagSummary {
 	}
 }
 
+// toOverride converts a domain override to its JSON shape.
 func toOverride(o flag.Override) overrideBody {
 	return overrideBody{UserID: o.UserID, Enabled: o.Enabled, UpdatedAt: o.UpdatedAt}
 }
 
+// toDetail converts a domain flag to its full JSON shape, with overrides.
 func toDetail(f flag.Flag) flagDetail {
 	overrides := make([]overrideBody, 0, len(f.Overrides))
 	for _, o := range f.Overrides {
@@ -111,6 +114,8 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	return nil
 }
 
+// decodeError turns a JSON decoding failure into a client-facing error with
+// a message that says what was wrong without echoing internals.
 func decodeError(err error) error {
 	var tooLarge *http.MaxBytesError
 	var syntax *json.SyntaxError
@@ -139,6 +144,8 @@ func decodeError(err error) error {
 	}
 }
 
+// createFlag handles POST /v1/flags. A new flag is disabled unless the body
+// sets "enabled": true. The actor is taken from the API key, not the body.
 func (a *api) createFlag(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name        string `json:"name"`
@@ -162,6 +169,8 @@ func (a *api) createFlag(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toDetail(f))
 }
 
+// listFlags handles GET /v1/flags: one page of flags in name order. When the
+// page is full, next_after tells the client where the next page starts.
 func (a *api) listFlags(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	limit := service.DefaultListLimit
@@ -190,6 +199,8 @@ func (a *api) listFlags(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// getFlag handles GET /v1/flags/{name}: the flag with its per-user overrides
+// and prerequisites.
 func (a *api) getFlag(w http.ResponseWriter, r *http.Request) {
 	f, err := a.svc.GetFlag(r.Context(), r.PathValue("name"))
 	if err != nil {
@@ -199,6 +210,8 @@ func (a *api) getFlag(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toDetail(f))
 }
 
+// updateFlag handles PATCH /v1/flags/{name}. Only the fields present in the
+// body change; this is how a flag is toggled globally.
 func (a *api) updateFlag(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Description *string `json:"description"`
@@ -219,6 +232,8 @@ func (a *api) updateFlag(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toDetail(f))
 }
 
+// deleteFlag handles DELETE /v1/flags/{name}. The flag's overrides are
+// removed with it.
 func (a *api) deleteFlag(w http.ResponseWriter, r *http.Request) {
 	if err := a.svc.DeleteFlag(r.Context(), principalFrom(r.Context()).Actor, r.PathValue("name")); err != nil {
 		a.fail(w, r, err)
@@ -227,6 +242,8 @@ func (a *api) deleteFlag(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// setOverride handles PUT /v1/flags/{name}/overrides/{userID}: forces the
+// flag on or off for one user, whatever the global state is.
 func (a *api) setOverride(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Enabled *bool `json:"enabled"`
@@ -248,6 +265,8 @@ func (a *api) setOverride(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toOverride(o))
 }
 
+// deleteOverride handles DELETE /v1/flags/{name}/overrides/{userID}: the
+// user goes back to the flag's global state.
 func (a *api) deleteOverride(w http.ResponseWriter, r *http.Request) {
 	err := a.svc.DeleteOverride(r.Context(), principalFrom(r.Context()).Actor,
 		r.PathValue("name"), r.PathValue("userID"))
@@ -258,6 +277,8 @@ func (a *api) deleteOverride(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// evaluate handles GET /v1/flags/{name}/evaluate?user_id=U: is this flag on
+// for this user? The response includes the reason code for the decision.
 func (a *api) evaluate(w http.ResponseWriter, r *http.Request) {
 	evaluation, err := a.svc.Evaluate(r.Context(), r.PathValue("name"), r.URL.Query().Get("user_id"))
 	if err != nil {

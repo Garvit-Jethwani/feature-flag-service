@@ -99,10 +99,14 @@ func (p *probeWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// healthz is the liveness check: the process is up. It needs no API key and
+// touches no dependency.
 func (a *api) healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// readyz is the readiness check: the service can reach its database and so
+// can serve requests. The underlying error is logged, not returned.
 func (a *api) readyz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), readinessTimeout)
 	defer cancel()
