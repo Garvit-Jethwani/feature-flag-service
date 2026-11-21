@@ -1,6 +1,6 @@
 # Plan 01: Core service
 
-Status: Approved (owner, 21 Nov 2026)
+Status: Implemented (approved by the owner on 21 Nov 2026; all verification steps passed)
 
 Covers F1, F2, F3 (uncached), and E2 from `SPECS.md`, plus the unit-test half of E3. Design reasoning is in `docs/discovery.md`. Budget: 35 minutes.
 

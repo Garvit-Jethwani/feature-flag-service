@@ -1,0 +1,12 @@
+# Keep secrets and anything the build does not need out of the build context.
+.env
+.env.*
+.git
+.github
+bin
+dist
+docs
+plans
+*.md
+docker-compose.yml
+Dockerfile

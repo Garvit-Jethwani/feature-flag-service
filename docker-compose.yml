@@ -1,6 +1,26 @@
 # Local development stack. Credentials come from .env (run `make env`);
 # nothing secret is stored in this file.
 services:
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgres://flags:${POSTGRES_PASSWORD:?run "make env" to create .env}@db:5432/flags?sslmode=disable
+      API_KEYS: ${API_KEYS:?run "make env" to create .env}
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      # Reachable from this machine only.
+      - "127.0.0.1:${PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
   db:
     image: postgres:17-alpine
     environment:

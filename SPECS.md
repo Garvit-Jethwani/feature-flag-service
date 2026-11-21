@@ -208,7 +208,7 @@ Each phase gets a plan in `plans/` that must be approved before work starts.
 | Phase | Scope | Covers | Budget |
 |---|---|---|---|
 | 0 | Repository setup, `SPECS.md`, `AGENTS.md` | | done |
-| 1 | Domain model, evaluator with unit tests, Postgres store, flag CRUD, overrides, evaluation endpoint, validation, auth | F1, F2, F3 (uncached), E2, E3 (unit) | 35 min |
+| 1 | Domain model, evaluator with unit tests, Postgres store, flag CRUD, overrides, evaluation endpoint, validation, auth | F1, F2, F3 (uncached), E2, E3 (unit) | done |
 | 2 | Cache with invalidation, audit trail | F3, F4 | 20 min |
 | 3 | HTTP integration tests, GitHub Actions, Dockerfile, README, architecture diagram | E1, E3, E4, E5 | 20 min |
 | 4 | Percentage rollout and flag dependencies exposed through the API | X2, X3 | 20 min |
