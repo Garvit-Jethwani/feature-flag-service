@@ -52,6 +52,8 @@ type Cache interface {
 	Set(flagName, userID string, result flag.Result, generation uint64)
 	// Invalidate drops every cached result for the named flags.
 	Invalidate(flagNames ...string)
+	// Len returns how many results are cached, for monitoring.
+	Len() int
 }
 
 // CacheStatus says how an evaluation was answered. It is returned to the
@@ -75,6 +77,12 @@ type Service struct {
 // New returns a Service.
 func New(store Store, cache Cache, logger *slog.Logger) *Service {
 	return &Service{store: store, cache: cache, log: logger}
+}
+
+// CacheEntries returns how many evaluation results are cached right now. It
+// backs the evaluation_cache_entries metric.
+func (s *Service) CacheEntries() int {
+	return s.cache.Len()
 }
 
 // CreateInput describes a new flag.

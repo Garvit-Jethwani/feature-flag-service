@@ -301,6 +301,7 @@ func (a *api) evaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("X-Cache", string(evaluation.Cache))
+	a.metrics.observeCacheResult(strings.ToLower(string(evaluation.Cache)))
 	writeJSON(w, http.StatusOK, evaluationBody{
 		Flag:    evaluation.Flag,
 		UserID:  evaluation.UserID,

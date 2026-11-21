@@ -528,7 +528,7 @@ func TestCommonResponseHeaders(t *testing.T) {
 func TestPanicBecomesA500(t *testing.T) {
 	logs := &lockedBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logs, nil))
-	handler := observe(logger, recoverPanic(logger, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := observe(logger, nil, recoverPanic(logger, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("boom")
 	})))
 

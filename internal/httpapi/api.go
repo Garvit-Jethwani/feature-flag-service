@@ -16,19 +16,21 @@ import (
 const readinessTimeout = 2 * time.Second
 
 type api struct {
-	svc   *service.Service
-	log   *slog.Logger
-	ready func(context.Context) error
+	svc     *service.Service
+	log     *slog.Logger
+	ready   func(context.Context) error
+	metrics *metrics
 }
 
 // New returns the HTTP handler for the service. ready reports whether the
 // service's dependencies are reachable; it backs /readyz.
 func New(svc *service.Service, auth *Authenticator, logger *slog.Logger, ready func(context.Context) error) http.Handler {
-	a := &api{svc: svc, log: logger, ready: ready}
+	a := &api{svc: svc, log: logger, ready: ready, metrics: newMetrics(svc.CacheEntries)}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.healthz)
 	mux.HandleFunc("GET /readyz", a.readyz)
+	mux.Handle("GET /metrics", auth.require(RoleReader, a.metricsHandler))
 
 	mux.Handle("GET /v1/flags", auth.require(RoleReader, a.listFlags))
 	mux.Handle("POST /v1/flags", auth.require(RoleAdmin, a.createFlag))
@@ -43,7 +45,7 @@ func New(svc *service.Service, auth *Authenticator, logger *slog.Logger, ready f
 	mux.Handle("GET /v1/audit", auth.require(RoleAdmin, a.listAudit))
 	mux.Handle("GET /v1/flags/{name}/audit", auth.require(RoleAdmin, a.flagAudit))
 
-	return observe(logger, recoverPanic(logger, route(mux)))
+	return observe(logger, a.metrics, recoverPanic(logger, route(mux)))
 }
 
 // route dispatches to mux, records the matched route pattern for the access

@@ -74,8 +74,8 @@ func (w *statusRecorder) Unwrap() http.ResponseWriter {
 //
 // The log records the matched route pattern rather than the raw URL, so flag
 // names, user IDs, and query strings stay out of the logs. Headers and bodies
-// are never logged.
-func observe(logger *slog.Logger, next http.Handler) http.Handler {
+// are never logged. The same facts feed the request metrics; m may be nil.
+func observe(logger *slog.Logger, m *metrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		info := &requestInfo{id: newRequestID(), route: "unmatched"}
@@ -93,16 +93,19 @@ func observe(logger *slog.Logger, next http.Handler) http.Handler {
 		recorder := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(recorder, r.WithContext(ctx))
 
+		duration := time.Since(start)
+		m.observeRequest(info.route, recorder.status, duration)
+
 		level := slog.LevelInfo
-		if info.route == "GET /healthz" || info.route == "GET /readyz" {
-			level = slog.LevelDebug // probes are frequent and uninteresting
+		if info.route == "GET /healthz" || info.route == "GET /readyz" || info.route == "GET /metrics" {
+			level = slog.LevelDebug // probes and scrapes are frequent and uninteresting
 		}
 		logger.Log(ctx, level, "request",
 			"request_id", info.id,
 			"method", r.Method,
 			"route", info.route,
 			"status", recorder.status,
-			"duration_ms", time.Since(start).Milliseconds(),
+			"duration_ms", duration.Milliseconds(),
 			"actor", info.actor,
 		)
 	})

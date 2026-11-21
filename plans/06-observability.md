@@ -15,9 +15,9 @@ Covers X4 from `SPECS.md` in its smallest useful form. Budget: 10 minutes.
 | # | Item | Detail |
 |---|---|---|
 | 1 | `GET /metrics` | Prometheus text format, written with the standard library (no new dependency). Requires an API key (either role), because the service is on the public internet. |
-| 2 | Request metrics | `http_requests_total{method,route,status}` and `http_request_duration_seconds_sum` / `_count` by route. The route label is the pattern, never the raw path, so the number of series stays small and no flag name or user ID leaks. |
+| 2 | Request metrics | `http_requests_total{route,status}` and `http_request_duration_seconds_sum` / `_count` by route. The route label is the pattern including the method (`GET /v1/flags/{name}`), never the raw path, so the number of series stays small and no flag name or user ID leaks. |
 | 3 | Cache metrics | `evaluation_cache_results_total{result="hit|miss|bypass"}` and `evaluation_cache_entries`. Together they give the hit ratio and show whether the cache sits at its entry limit. |
-| 4 | Rate limit metric | `rate_limited_requests_total`. |
+| 4 | Rate limiting | No separate metric: rate-limited requests are `http_requests_total{status="429"}`. |
 | 5 | Platform alerts | In the App Platform spec (plan 05): failed deployment, restarts, CPU, memory. |
 | 6 | `docs/next-steps.md` | How to extend this (histograms, dashboards, tracing, SLOs, log shipping) and the other improvements deliberately left out. |
 
