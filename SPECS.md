@@ -61,6 +61,8 @@ Time box: about 3 hours in total, including review. Language: Go.
 
 ## 5. Decisions
 
+The options, trade-offs, and reasoning behind each decision are in [`docs/discovery.md`](docs/discovery.md), which also raises D8 (what the cache holds) and D9 (integration test database).
+
 | # | Decision | Proposal | Alternative considered | Status |
 |---|---|---|---|---|
 | D1 | Storage | **PostgreSQL**, with SQL migrations embedded in the binary. Run locally through Docker Compose. | SQLite (simpler, but awkward on ephemeral cloud filesystems); in-memory only (not production-ready). | Proposed |
