@@ -279,16 +279,129 @@ func (a *api) deleteOverride(w http.ResponseWriter, r *http.Request) {
 
 // evaluate handles GET /v1/flags/{name}/evaluate?user_id=U: is this flag on
 // for this user? The response includes the reason code for the decision.
+//
+// Results are cached. The X-Cache response header says how this request was
+// answered: HIT (from the cache), MISS (computed and then cached), or BYPASS
+// (the client sent "Cache-Control: no-cache" to force a fresh result).
 func (a *api) evaluate(w http.ResponseWriter, r *http.Request) {
-	evaluation, err := a.svc.Evaluate(r.Context(), r.PathValue("name"), r.URL.Query().Get("user_id"))
+	bypass := wantsFreshResult(r.Header.Values("Cache-Control"))
+	evaluation, err := a.svc.Evaluate(r.Context(), r.PathValue("name"), r.URL.Query().Get("user_id"), bypass)
 	if err != nil {
 		a.fail(w, r, err)
 		return
 	}
+	w.Header().Set("X-Cache", string(evaluation.Cache))
 	writeJSON(w, http.StatusOK, evaluationBody{
 		Flag:    evaluation.Flag,
 		UserID:  evaluation.UserID,
 		Enabled: evaluation.Enabled,
 		Reason:  string(evaluation.Reason),
 	})
+}
+
+// wantsFreshResult reports whether a request's Cache-Control header contains
+// the no-cache directive, which asks the service to skip its cache.
+func wantsFreshResult(cacheControl []string) bool {
+	for _, value := range cacheControl {
+		for _, directive := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(directive), "no-cache") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// auditEntryBody is the JSON shape of one audit entry. Previous and New are
+// passed through as stored; each is null when there was no value.
+type auditEntryBody struct {
+	ID         int64           `json:"id"`
+	Flag       string          `json:"flag"`
+	Action     string          `json:"action"`
+	Actor      string          `json:"actor"`
+	Previous   json.RawMessage `json:"previous"`
+	New        json.RawMessage `json:"new"`
+	OccurredAt time.Time       `json:"occurred_at"`
+}
+
+type auditList struct {
+	Entries []auditEntryBody `json:"entries"`
+	// NextBefore is set when there may be older entries; pass it as ?before=.
+	NextBefore int64 `json:"next_before,omitempty"`
+}
+
+// auditPage reads the limit and before query parameters shared by the audit
+// endpoints. A missing limit is returned as zero, meaning the default.
+func auditPage(r *http.Request) (before int64, limit int, err error) {
+	query := r.URL.Query()
+	if raw := query.Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 {
+			return 0, 0, &flag.ValidationError{Field: "limit", Message: "must be from 1 to 200"}
+		}
+	}
+	if raw := query.Get("before"); raw != "" {
+		before, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || before < 1 {
+			return 0, 0, &flag.ValidationError{Field: "before", Message: "must be a positive number"}
+		}
+	}
+	return before, limit, nil
+}
+
+// writeAudit writes one page of audit entries. limit is the page size that
+// was asked for (zero meaning the default); a full page means there may be
+// more, so the id to continue from is included.
+func writeAudit(w http.ResponseWriter, entries []flag.AuditEntry, limit int) {
+	if limit == 0 {
+		limit = service.DefaultAuditLimit
+	}
+	out := auditList{Entries: make([]auditEntryBody, 0, len(entries))}
+	for _, e := range entries {
+		out.Entries = append(out.Entries, auditEntryBody{
+			ID:         e.ID,
+			Flag:       e.FlagName,
+			Action:     string(e.Action),
+			Actor:      e.Actor,
+			Previous:   e.Previous,
+			New:        e.New,
+			OccurredAt: e.OccurredAt,
+		})
+	}
+	if len(entries) == limit {
+		out.NextBefore = entries[len(entries)-1].ID
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// listAudit handles GET /v1/audit: every flag's changes, newest first.
+// Admin keys only, because entries name actors and overridden users.
+func (a *api) listAudit(w http.ResponseWriter, r *http.Request) {
+	before, limit, err := auditPage(r)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	entries, err := a.svc.Audit(r.Context(), before, limit)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeAudit(w, entries, limit)
+}
+
+// flagAudit handles GET /v1/flags/{name}/audit: one flag's changes, newest
+// first. It also works after the flag has been deleted.
+func (a *api) flagAudit(w http.ResponseWriter, r *http.Request) {
+	before, limit, err := auditPage(r)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	entries, err := a.svc.FlagAudit(r.Context(), r.PathValue("name"), before, limit)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeAudit(w, entries, limit)
 }

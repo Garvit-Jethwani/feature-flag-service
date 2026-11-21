@@ -6,8 +6,10 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -34,22 +36,26 @@ type Principal struct {
 
 var actorPattern = regexp.MustCompile(`^[A-Za-z0-9._@-]{1,64}$`)
 
+// apiKey is one configured key: the hash of its token, who it belongs to,
+// and its own rate limiter.
 type apiKey struct {
 	tokenHash [sha256.Size]byte
 	principal Principal
+	limiter   *tokenBucket // nil when rate limiting is disabled
 }
 
-// Authenticator checks Bearer tokens against the configured API keys. Only
-// SHA-256 hashes of the tokens are kept in memory.
+// Authenticator checks Bearer tokens against the configured API keys and
+// applies the per-key rate limit. Only SHA-256 hashes of the tokens are kept
+// in memory.
 type Authenticator struct {
-	keys []apiKey
+	keys []*apiKey
 }
 
-// NewAuthenticator parses a comma-separated list of actor:role:token entries.
-// It rejects malformed entries, unknown roles, short or duplicate tokens, and
-// a list without an admin key. Errors identify entries by position and never
-// include a token.
-func NewAuthenticator(spec string) (*Authenticator, error) {
+// NewAuthenticator parses a comma-separated list of actor:role:token entries
+// and gives each key its own rate limiter. It rejects malformed entries,
+// unknown roles, short or duplicate tokens, and a list without an admin key.
+// Errors identify entries by position and never include a token.
+func NewAuthenticator(spec string, limit RateLimit) (*Authenticator, error) {
 	a := &Authenticator{}
 	seen := map[[sha256.Size]byte]bool{}
 	hasAdmin := false
@@ -87,7 +93,11 @@ func NewAuthenticator(spec string) (*Authenticator, error) {
 		}
 		seen[hash] = true
 		hasAdmin = hasAdmin || role == RoleAdmin
-		a.keys = append(a.keys, apiKey{tokenHash: hash, principal: Principal{Actor: actor, Role: role}})
+		a.keys = append(a.keys, &apiKey{
+			tokenHash: hash,
+			principal: Principal{Actor: actor, Role: role},
+			limiter:   newTokenBucket(limit),
+		})
 	}
 
 	if len(a.keys) == 0 {
@@ -99,20 +109,27 @@ func NewAuthenticator(spec string) (*Authenticator, error) {
 	return a, nil
 }
 
-// Authenticate returns the principal for a token. Hashes are compared in
-// constant time and every key is checked, so the time taken does not reveal
-// which key, if any, came close to matching.
-func (a *Authenticator) Authenticate(token string) (Principal, bool) {
+// lookup returns the configured key for a token, or nil. Hashes are compared
+// in constant time and every key is checked, so the time taken does not
+// reveal which key, if any, came close to matching.
+func (a *Authenticator) lookup(token string) *apiKey {
 	hash := sha256.Sum256([]byte(token))
-	var principal Principal
-	found := false
+	var match *apiKey
 	for _, key := range a.keys {
 		if subtle.ConstantTimeCompare(hash[:], key.tokenHash[:]) == 1 {
-			principal = key.principal
-			found = true
+			match = key
 		}
 	}
-	return principal, found
+	return match
+}
+
+// Authenticate returns the principal for a token.
+func (a *Authenticator) Authenticate(token string) (Principal, bool) {
+	key := a.lookup(token)
+	if key == nil {
+		return Principal{}, false
+	}
+	return key.principal, true
 }
 
 type principalKey struct{}
@@ -135,8 +152,11 @@ func bearerToken(header string) (string, bool) {
 
 // require wraps next so that it runs only for an authenticated caller holding
 // at least the given role. RoleReader admits any valid key; RoleAdmin admits
-// only admin keys. It answers 401 without valid credentials and 403 when the
-// key is valid but lacks the role.
+// only admin keys.
+//
+// Checks run in this order: 401 without valid credentials, 429 when the key
+// has used up its rate limit, 403 when the key is valid but lacks the role.
+// All three happen before any database work.
 func (a *Authenticator) require(role Role, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r.Header.Get("Authorization"))
@@ -145,17 +165,28 @@ func (a *Authenticator) require(role Role, next http.HandlerFunc) http.Handler {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "a Bearer API key is required")
 			return
 		}
-		principal, ok := a.Authenticate(token)
-		if !ok {
+		key := a.lookup(token)
+		if key == nil {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="feature-flags", error="invalid_token"`)
 			writeError(w, http.StatusUnauthorized, "unauthorized", "the API key is not valid")
 			return
 		}
+		principal := key.principal
 		if info := requestInfoFrom(r.Context()); info != nil {
-			info.actor = principal.Actor
+			info.actor = principal.Actor // for the access log
 		}
+
+		// Each key has its own bucket, so one busy client cannot use up
+		// another client's allowance.
+		if allowed, retryAfter := key.limiter.allow(); !allowed {
+			seconds := int(math.Ceil(retryAfter.Seconds()))
+			w.Header().Set("Retry-After", strconv.Itoa(max(1, seconds)))
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests for this API key; retry later")
+			return
+		}
+
 		if role == RoleAdmin && principal.Role != RoleAdmin {
-			writeError(w, http.StatusForbidden, "forbidden", "this API key may not change flags")
+			writeError(w, http.StatusForbidden, "forbidden", "this API key does not have the admin role")
 			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, principal)))

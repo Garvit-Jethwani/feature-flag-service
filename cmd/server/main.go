@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Garvit-Jethwani/feature-flag-service/internal/cache"
 	"github.com/Garvit-Jethwani/feature-flag-service/internal/config"
 	"github.com/Garvit-Jethwani/feature-flag-service/internal/httpapi"
 	"github.com/Garvit-Jethwani/feature-flag-service/internal/service"
@@ -41,7 +42,11 @@ func run() error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 
-	auth, err := httpapi.NewAuthenticator(cfg.APIKeys)
+	// Each API key gets its own rate limiter.
+	auth, err := httpapi.NewAuthenticator(cfg.APIKeys, httpapi.RateLimit{
+		PerSecond: cfg.RateLimitPerSecond,
+		Burst:     cfg.RateLimitBurst,
+	})
 	if err != nil {
 		return err
 	}
@@ -63,8 +68,17 @@ func run() error {
 		return err
 	}
 
+	// Wire the layers together: store (Postgres) and cache (in memory) sit
+	// behind the service, and the HTTP layer sits in front of it.
 	flagStore := store.New(pool)
-	handler := httpapi.New(service.New(flagStore, logger), auth, logger, flagStore.Ping)
+	resultCache := cache.NewMemory(cfg.CacheTTL, cfg.CacheMaxEntries)
+	handler := httpapi.New(service.New(flagStore, resultCache, logger), auth, logger, flagStore.Ping)
+	logger.Info("configured",
+		"cache_ttl", cfg.CacheTTL.String(),
+		"cache_max_entries", cfg.CacheMaxEntries,
+		"rate_limit_rps", cfg.RateLimitPerSecond,
+		"rate_limit_burst", cfg.RateLimitBurst,
+	)
 
 	server := &http.Server{
 		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Port)),

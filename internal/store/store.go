@@ -1,4 +1,9 @@
 // Package store persists flags in PostgreSQL. Every query is parameterized.
+//
+// Every write runs in one transaction that locks the flag, applies the
+// change, and inserts the audit entry, so a change and its audit entry can
+// never disagree. Writes also report which flags' cached evaluation results
+// are now out of date, for the caller to invalidate after the commit.
 package store
 
 import (
@@ -27,6 +32,14 @@ const flagColumns = `
 		SELECT p.requires_flag FROM flag_prerequisites p
 		WHERE p.flag_name = f.name ORDER BY p.requires_flag
 	)`
+
+// querier is the part of pgx shared by a connection pool and a transaction,
+// so the same helper can run inside or outside a transaction.
+type querier interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
 
 // Store reads and writes flags.
 type Store struct {
@@ -61,21 +74,73 @@ func hasCode(err error, code string) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == code
 }
 
-// CreateFlag inserts a flag. It returns flag.ErrAlreadyExists if the name is
-// taken.
-func (s *Store) CreateFlag(ctx context.Context, name, description string, enabled bool) (flag.Flag, error) {
+// lockFlag reads a flag inside a transaction and locks its row until the
+// transaction ends. Concurrent changes to the same flag therefore run one
+// after another, and each sees the result of the one before it. It returns
+// flag.ErrNotFound if the flag does not exist.
+func lockFlag(ctx context.Context, tx pgx.Tx, name string) (flag.Flag, error) {
+	const query = `SELECT ` + flagColumns + ` FROM flags f WHERE f.name = $1 FOR UPDATE OF f`
+	f, err := scanFlag(tx.QueryRow(ctx, query, name))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return flag.Flag{}, flag.ErrNotFound
+	}
+	if err != nil {
+		return flag.Flag{}, fmt.Errorf("lock flag: %w", err)
+	}
+	return f, nil
+}
+
+// affectedFlags returns the flag itself plus every flag that requires it,
+// directly or through other flags. These are the flags whose cached
+// evaluation results a change to this flag can alter. The depth bound keeps
+// the query finite even if the stored data contained a cycle.
+func affectedFlags(ctx context.Context, q querier, name string) ([]string, error) {
+	const query = `
+		WITH RECURSIVE dependents (name, depth) AS (
+			SELECT p.flag_name, 1 FROM flag_prerequisites p WHERE p.requires_flag = $1
+			UNION
+			SELECT p.flag_name, d.depth + 1
+			FROM dependents d
+			JOIN flag_prerequisites p ON p.requires_flag = d.name
+			WHERE d.depth < $2
+		)
+		SELECT DISTINCT name FROM dependents`
+	rows, err := q.Query(ctx, query, name, flag.MaxPrerequisiteDepth+1)
+	if err != nil {
+		return nil, fmt.Errorf("select dependent flags: %w", err)
+	}
+	dependents, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("read dependent flags: %w", err)
+	}
+	return append([]string{name}, dependents...), nil
+}
+
+// CreateFlag inserts a flag and its audit entry. It returns
+// flag.ErrAlreadyExists if the name is taken. Nothing needs invalidating:
+// no result is ever cached for a flag that does not exist.
+func (s *Store) CreateFlag(ctx context.Context, actor, name, description string, enabled bool) (flag.Flag, error) {
 	const query = `
 		INSERT INTO flags AS f (name, description, enabled)
 		VALUES ($1, $2, $3)
 		RETURNING ` + flagColumns
-	f, err := scanFlag(s.pool.QueryRow(ctx, query, name, description, enabled))
-	if hasCode(err, pgUniqueViolation) {
-		return flag.Flag{}, flag.ErrAlreadyExists
-	}
+
+	var created flag.Flag
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		f, err := scanFlag(tx.QueryRow(ctx, query, name, description, enabled))
+		if hasCode(err, pgUniqueViolation) {
+			return flag.ErrAlreadyExists
+		}
+		if err != nil {
+			return fmt.Errorf("insert flag: %w", err)
+		}
+		created = f
+		return insertAudit(ctx, tx, actor, name, flag.ActionFlagCreated, nil, f.State())
+	})
 	if err != nil {
-		return flag.Flag{}, fmt.Errorf("insert flag: %w", err)
+		return flag.Flag{}, err
 	}
-	return f, nil
+	return created, nil
 }
 
 // GetFlag returns a flag with its overrides and prerequisites, or
@@ -89,20 +154,20 @@ func (s *Store) GetFlag(ctx context.Context, name string) (flag.Flag, error) {
 	if err != nil {
 		return flag.Flag{}, fmt.Errorf("select flag: %w", err)
 	}
-	if f.Overrides, err = s.listOverrides(ctx, name); err != nil {
+	if f.Overrides, err = listOverrides(ctx, s.pool, name); err != nil {
 		return flag.Flag{}, err
 	}
 	return f, nil
 }
 
 // listOverrides returns every per-user override of a flag, ordered by user.
-func (s *Store) listOverrides(ctx context.Context, name string) ([]flag.Override, error) {
+func listOverrides(ctx context.Context, q querier, name string) ([]flag.Override, error) {
 	const query = `
 		SELECT user_id, enabled, updated_at
 		FROM flag_overrides
 		WHERE flag_name = $1
 		ORDER BY user_id`
-	rows, err := s.pool.Query(ctx, query, name)
+	rows, err := q.Query(ctx, query, name)
 	if err != nil {
 		return nil, fmt.Errorf("select overrides: %w", err)
 	}
@@ -139,88 +204,176 @@ func (s *Store) ListFlags(ctx context.Context, after string, limit int) ([]flag.
 	return flags, nil
 }
 
-// UpdateFlag applies a partial update and returns the updated flag with its
-// overrides, or flag.ErrNotFound.
-func (s *Store) UpdateFlag(ctx context.Context, name string, patch flag.Patch) (flag.Flag, error) {
+// UpdateFlag applies a partial update and returns the flag with its
+// overrides, plus the flags whose cached results must be invalidated.
+//
+// If the patch would change nothing, the flag is returned as it is, no audit
+// entry is written, and no flags are reported for invalidation: the audit
+// trail records state changes, and there was none. It returns
+// flag.ErrNotFound if the flag does not exist.
+func (s *Store) UpdateFlag(ctx context.Context, actor, name string, patch flag.Patch) (flag.Flag, []string, error) {
 	const query = `
 		UPDATE flags AS f
-		SET description = COALESCE($2, f.description),
-		    enabled     = COALESCE($3, f.enabled),
-		    updated_at  = now()
+		SET description = $2, enabled = $3, updated_at = now()
 		WHERE f.name = $1
 		RETURNING ` + flagColumns
-	f, err := scanFlag(s.pool.QueryRow(ctx, query, name, patch.Description, patch.Enabled))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return flag.Flag{}, flag.ErrNotFound
-	}
+
+	var updated flag.Flag
+	var affected []string
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		previous, err := lockFlag(ctx, tx, name)
+		if err != nil {
+			return err
+		}
+
+		// Work out the values after the patch; a nil field keeps its value.
+		description, enabled := previous.Description, previous.Enabled
+		if patch.Description != nil {
+			description = *patch.Description
+		}
+		if patch.Enabled != nil {
+			enabled = *patch.Enabled
+		}
+
+		updated = previous
+		if description != previous.Description || enabled != previous.Enabled {
+			updated, err = scanFlag(tx.QueryRow(ctx, query, name, description, enabled))
+			if err != nil {
+				return fmt.Errorf("update flag: %w", err)
+			}
+			if err := insertAudit(ctx, tx, actor, name, flag.ActionFlagUpdated, previous.State(), updated.State()); err != nil {
+				return err
+			}
+			if affected, err = affectedFlags(ctx, tx, name); err != nil {
+				return err
+			}
+		}
+
+		updated.Overrides, err = listOverrides(ctx, tx, name)
+		return err
+	})
 	if err != nil {
-		return flag.Flag{}, fmt.Errorf("update flag: %w", err)
+		return flag.Flag{}, nil, err
 	}
-	if f.Overrides, err = s.listOverrides(ctx, name); err != nil {
-		return flag.Flag{}, err
-	}
-	return f, nil
+	return updated, affected, nil
 }
 
-// DeleteFlag removes a flag and its overrides. It returns flag.ErrNotFound
-// if the flag does not exist and flag.ErrHasDependents if other flags
-// require it.
-func (s *Store) DeleteFlag(ctx context.Context, name string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM flags WHERE name = $1`, name)
-	if hasCode(err, pgForeignKeyViolation) {
-		return flag.ErrHasDependents
-	}
+// DeleteFlag removes a flag and its overrides, records the deletion, and
+// returns the flags whose cached results must be invalidated. It returns
+// flag.ErrNotFound if the flag does not exist and flag.ErrHasDependents if
+// other flags require it.
+func (s *Store) DeleteFlag(ctx context.Context, actor, name string) ([]string, error) {
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		previous, err := lockFlag(ctx, tx, name)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM flags WHERE name = $1`, name)
+		if hasCode(err, pgForeignKeyViolation) {
+			return flag.ErrHasDependents
+		}
+		if err != nil {
+			return fmt.Errorf("delete flag: %w", err)
+		}
+		return insertAudit(ctx, tx, actor, name, flag.ActionFlagDeleted, previous.State(), nil)
+	})
 	if err != nil {
-		return fmt.Errorf("delete flag: %w", err)
+		return nil, err
 	}
-	if tag.RowsAffected() == 0 {
-		return flag.ErrNotFound
-	}
-	return nil
+	// A flag can only be deleted when nothing requires it, so only its own
+	// cached results are affected.
+	return []string{name}, nil
 }
 
-// SetOverride creates or replaces a user's override. It returns
-// flag.ErrNotFound if the flag does not exist.
-func (s *Store) SetOverride(ctx context.Context, name, userID string, enabled bool) (flag.Override, error) {
-	const query = `
+// SetOverride creates or replaces a user's override, records the change,
+// and returns the flags whose cached results must be invalidated. Setting an
+// override to the value it already has changes nothing and is not audited.
+// It returns flag.ErrNotFound if the flag does not exist.
+func (s *Store) SetOverride(ctx context.Context, actor, name, userID string, enabled bool) (flag.Override, []string, error) {
+	const selectCurrent = `
+		SELECT user_id, enabled, updated_at
+		FROM flag_overrides
+		WHERE flag_name = $1 AND user_id = $2`
+	const upsert = `
 		INSERT INTO flag_overrides (flag_name, user_id, enabled)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (flag_name, user_id)
 		DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = now()
 		RETURNING user_id, enabled, updated_at`
-	var o flag.Override
-	err := s.pool.QueryRow(ctx, query, name, userID, enabled).Scan(&o.UserID, &o.Enabled, &o.UpdatedAt)
-	if hasCode(err, pgForeignKeyViolation) {
-		return flag.Override{}, flag.ErrNotFound
-	}
+
+	var override flag.Override
+	var affected []string
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := lockFlag(ctx, tx, name); err != nil {
+			return err
+		}
+
+		// previous stays nil when the user had no override before.
+		var previous any
+		var current flag.Override
+		err := tx.QueryRow(ctx, selectCurrent, name, userID).Scan(&current.UserID, &current.Enabled, &current.UpdatedAt)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+		case err != nil:
+			return fmt.Errorf("select override: %w", err)
+		case current.Enabled == enabled:
+			override = current
+			return nil // nothing changes
+		default:
+			previous = flag.OverrideState{UserID: userID, Enabled: current.Enabled}
+		}
+
+		err = tx.QueryRow(ctx, upsert, name, userID, enabled).Scan(&override.UserID, &override.Enabled, &override.UpdatedAt)
+		if err != nil {
+			return fmt.Errorf("upsert override: %w", err)
+		}
+		next := flag.OverrideState{UserID: userID, Enabled: enabled}
+		if err := insertAudit(ctx, tx, actor, name, flag.ActionOverrideSet, previous, next); err != nil {
+			return err
+		}
+		affected, err = affectedFlags(ctx, tx, name)
+		return err
+	})
 	if err != nil {
-		return flag.Override{}, fmt.Errorf("upsert override: %w", err)
+		return flag.Override{}, nil, err
 	}
-	return o, nil
+	return override, affected, nil
 }
 
-// DeleteOverride removes a user's override. It returns flag.ErrNotFound if
-// the flag does not exist and flag.ErrOverrideNotFound if the flag exists
-// but has no override for the user.
-func (s *Store) DeleteOverride(ctx context.Context, name, userID string) error {
-	const query = `DELETE FROM flag_overrides WHERE flag_name = $1 AND user_id = $2`
-	tag, err := s.pool.Exec(ctx, query, name, userID)
-	if err != nil {
-		return fmt.Errorf("delete override: %w", err)
-	}
-	if tag.RowsAffected() > 0 {
-		return nil
-	}
+// DeleteOverride removes a user's override, records the change, and returns
+// the flags whose cached results must be invalidated. It returns
+// flag.ErrNotFound if the flag does not exist and flag.ErrOverrideNotFound
+// if the flag exists but has no override for the user.
+func (s *Store) DeleteOverride(ctx context.Context, actor, name, userID string) ([]string, error) {
+	const query = `
+		DELETE FROM flag_overrides
+		WHERE flag_name = $1 AND user_id = $2
+		RETURNING enabled`
 
-	var exists bool
-	const flagExists = `SELECT EXISTS (SELECT 1 FROM flags WHERE name = $1)`
-	if err := s.pool.QueryRow(ctx, flagExists, name).Scan(&exists); err != nil {
-		return fmt.Errorf("check flag exists: %w", err)
+	var affected []string
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := lockFlag(ctx, tx, name); err != nil {
+			return err
+		}
+		var wasEnabled bool
+		err := tx.QueryRow(ctx, query, name, userID).Scan(&wasEnabled)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return flag.ErrOverrideNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("delete override: %w", err)
+		}
+		previous := flag.OverrideState{UserID: userID, Enabled: wasEnabled}
+		if err := insertAudit(ctx, tx, actor, name, flag.ActionOverrideRemoved, previous, nil); err != nil {
+			return err
+		}
+		affected, err = affectedFlags(ctx, tx, name)
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	if !exists {
-		return flag.ErrNotFound
-	}
-	return flag.ErrOverrideNotFound
+	return affected, nil
 }
 
 // EvaluationSnapshot loads, in one query, what is needed to evaluate a flag
@@ -258,7 +411,7 @@ func (s *Store) EvaluationSnapshot(ctx context.Context, name, userID string) (fl
 	snap := flag.Snapshot{Flags: map[string]flag.Flag{}, Overrides: map[string]bool{}}
 	for rows.Next() {
 		var f flag.Flag
-		var override *bool
+		var override *bool // nil when the user has no override on this flag
 		if err := rows.Scan(&f.Name, &f.Enabled, &f.RolloutPercentage, &f.Prerequisites, &override); err != nil {
 			return flag.Snapshot{}, fmt.Errorf("read evaluation snapshot: %w", err)
 		}

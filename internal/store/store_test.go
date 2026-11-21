@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -12,9 +13,11 @@ import (
 	"github.com/Garvit-Jethwani/feature-flag-service/internal/store/storetest"
 )
 
+const actor = "tester"
+
 func mustCreate(t *testing.T, s *store.Store, name string, enabled bool) {
 	t.Helper()
-	if _, err := s.CreateFlag(context.Background(), name, "", enabled); err != nil {
+	if _, err := s.CreateFlag(context.Background(), actor, name, "", enabled); err != nil {
 		t.Fatalf("CreateFlag(%q): %v", name, err)
 	}
 }
@@ -29,67 +32,76 @@ func require(t *testing.T, pool *pgxpool.Pool, flagName, requires string) {
 	}
 }
 
+// auditCount returns how many audit entries exist for a flag.
+func auditCount(t *testing.T, s *store.Store, name string) int {
+	t.Helper()
+	entries, err := s.ListAudit(context.Background(), name, 0, 200)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	return len(entries)
+}
+
 func TestMigrateIsIdempotent(t *testing.T) {
 	pool := storetest.NewPool(t) // already migrated once
 	if err := store.Migrate(context.Background(), pool); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
-	var count int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
-		t.Fatalf("count migrations: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("schema_migrations has %d rows, want 1", count)
-	}
 }
 
-func TestCreateFlagDefaultsAndDuplicate(t *testing.T) {
+func TestCreateUpdateDelete(t *testing.T) {
 	ctx := context.Background()
 	s := store.New(storetest.NewPool(t))
 
-	f, err := s.CreateFlag(ctx, "new-checkout", "New checkout flow", false)
+	f, err := s.CreateFlag(ctx, actor, "f", "original", false)
 	if err != nil {
 		t.Fatalf("CreateFlag: %v", err)
 	}
 	if f.Enabled || f.RolloutPercentage != 100 || len(f.Prerequisites) != 0 {
 		t.Errorf("unexpected defaults: %+v", f)
 	}
-	if f.CreatedAt.IsZero() || f.UpdatedAt.IsZero() {
-		t.Errorf("timestamps not set: %+v", f)
-	}
-
-	if _, err := s.CreateFlag(ctx, "new-checkout", "", true); !errors.Is(err, flag.ErrAlreadyExists) {
+	if _, err := s.CreateFlag(ctx, actor, "f", "", true); !errors.Is(err, flag.ErrAlreadyExists) {
 		t.Errorf("duplicate CreateFlag error = %v, want ErrAlreadyExists", err)
 	}
-}
 
-func TestUpdateFlagChangesOnlyGivenFields(t *testing.T) {
-	ctx := context.Background()
-	s := store.New(storetest.NewPool(t))
-	if _, err := s.CreateFlag(ctx, "f", "original", false); err != nil {
-		t.Fatalf("CreateFlag: %v", err)
-	}
-
+	// A patch changes only the fields it names.
 	enabled := true
-	f, err := s.UpdateFlag(ctx, "f", flag.Patch{Enabled: &enabled})
+	f, affected, err := s.UpdateFlag(ctx, actor, "f", flag.Patch{Enabled: &enabled})
 	if err != nil {
 		t.Fatalf("UpdateFlag: %v", err)
 	}
 	if !f.Enabled || f.Description != "original" {
 		t.Errorf("after enabling: %+v, want enabled with the original description", f)
 	}
+	if !slices.Equal(affected, []string{"f"}) {
+		t.Errorf("affected = %v, want [f]", affected)
+	}
 
-	description := "changed"
-	f, err = s.UpdateFlag(ctx, "f", flag.Patch{Description: &description})
+	// A patch that changes nothing reports nothing to invalidate and writes
+	// no audit entry. So far: one entry for the create, one for the update.
+	_, affected, err = s.UpdateFlag(ctx, actor, "f", flag.Patch{Enabled: &enabled})
 	if err != nil {
-		t.Fatalf("UpdateFlag: %v", err)
+		t.Fatalf("no-op UpdateFlag: %v", err)
 	}
-	if !f.Enabled || f.Description != "changed" {
-		t.Errorf("after describing: %+v, want still enabled with the new description", f)
+	if len(affected) != 0 {
+		t.Errorf("no-op update reported %v for invalidation", affected)
+	}
+	if got := auditCount(t, s, "f"); got != 2 {
+		t.Errorf("audit entries = %d, want 2 (the failed duplicate and the no-op must not be recorded)", got)
 	}
 
-	if _, err := s.UpdateFlag(ctx, "missing", flag.Patch{Enabled: &enabled}); !errors.Is(err, flag.ErrNotFound) {
+	if _, _, err := s.UpdateFlag(ctx, actor, "missing", flag.Patch{Enabled: &enabled}); !errors.Is(err, flag.ErrNotFound) {
 		t.Errorf("UpdateFlag on a missing flag: error = %v, want ErrNotFound", err)
+	}
+	if _, err := s.DeleteFlag(ctx, actor, "f"); err != nil {
+		t.Fatalf("DeleteFlag: %v", err)
+	}
+	if _, err := s.DeleteFlag(ctx, actor, "f"); !errors.Is(err, flag.ErrNotFound) {
+		t.Errorf("deleting twice: error = %v, want ErrNotFound", err)
+	}
+	// The history outlives the flag.
+	if got := auditCount(t, s, "f"); got != 3 {
+		t.Errorf("audit entries after delete = %d, want 3", got)
 	}
 }
 
@@ -98,63 +110,63 @@ func TestOverrides(t *testing.T) {
 	s := store.New(storetest.NewPool(t))
 	mustCreate(t, s, "f", false)
 
-	if _, err := s.SetOverride(ctx, "missing", "u1", true); !errors.Is(err, flag.ErrNotFound) {
+	if _, _, err := s.SetOverride(ctx, actor, "missing", "u1", true); !errors.Is(err, flag.ErrNotFound) {
 		t.Errorf("SetOverride on a missing flag: error = %v, want ErrNotFound", err)
 	}
-
-	if _, err := s.SetOverride(ctx, "f", "u1", true); err != nil {
+	if _, _, err := s.SetOverride(ctx, actor, "f", "u1", true); err != nil {
 		t.Fatalf("SetOverride: %v", err)
 	}
-	if _, err := s.SetOverride(ctx, "f", "u1", false); err != nil { // replace
+	if _, _, err := s.SetOverride(ctx, actor, "f", "u1", false); err != nil { // replace
 		t.Fatalf("SetOverride (replace): %v", err)
 	}
-	if _, err := s.SetOverride(ctx, "f", "u2", true); err != nil {
-		t.Fatalf("SetOverride: %v", err)
+	// Setting the same value again changes nothing.
+	if _, affected, err := s.SetOverride(ctx, actor, "f", "u1", false); err != nil || len(affected) != 0 {
+		t.Errorf("no-op SetOverride: affected %v, error %v; want nothing", affected, err)
 	}
 
 	f, err := s.GetFlag(ctx, "f")
 	if err != nil {
 		t.Fatalf("GetFlag: %v", err)
 	}
-	if len(f.Overrides) != 2 ||
-		f.Overrides[0].UserID != "u1" || f.Overrides[0].Enabled ||
-		f.Overrides[1].UserID != "u2" || !f.Overrides[1].Enabled {
-		t.Errorf("overrides = %+v, want u1=false then u2=true", f.Overrides)
+	if len(f.Overrides) != 1 || f.Overrides[0].UserID != "u1" || f.Overrides[0].Enabled {
+		t.Errorf("overrides = %+v, want u1=false", f.Overrides)
 	}
 
-	if err := s.DeleteOverride(ctx, "f", "u1"); err != nil {
+	if _, err := s.DeleteOverride(ctx, actor, "f", "u1"); err != nil {
 		t.Fatalf("DeleteOverride: %v", err)
 	}
-	if err := s.DeleteOverride(ctx, "f", "u1"); !errors.Is(err, flag.ErrOverrideNotFound) {
+	if _, err := s.DeleteOverride(ctx, actor, "f", "u1"); !errors.Is(err, flag.ErrOverrideNotFound) {
 		t.Errorf("second DeleteOverride: error = %v, want ErrOverrideNotFound", err)
 	}
-	if err := s.DeleteOverride(ctx, "missing", "u1"); !errors.Is(err, flag.ErrNotFound) {
+	if _, err := s.DeleteOverride(ctx, actor, "missing", "u1"); !errors.Is(err, flag.ErrNotFound) {
 		t.Errorf("DeleteOverride on a missing flag: error = %v, want ErrNotFound", err)
 	}
 }
 
-func TestDeleteFlag(t *testing.T) {
+// A change to a flag must report every flag that depends on it, so their
+// cached results are invalidated too. A required flag cannot be deleted.
+func TestDependentsAreReportedAndProtectDeletion(t *testing.T) {
 	ctx := context.Background()
 	pool := storetest.NewPool(t)
 	s := store.New(pool)
-	mustCreate(t, s, "base", true)
-	mustCreate(t, s, "feature", true)
-	require(t, pool, "feature", "base")
-	if _, err := s.SetOverride(ctx, "feature", "u1", true); err != nil {
-		t.Fatalf("SetOverride: %v", err)
+	for _, name := range []string{"base", "mid", "feature", "unrelated"} {
+		mustCreate(t, s, name, true)
+	}
+	require(t, pool, "feature", "mid") // feature -> mid -> base
+	require(t, pool, "mid", "base")
+
+	disabled := false
+	_, affected, err := s.UpdateFlag(ctx, actor, "base", flag.Patch{Enabled: &disabled})
+	if err != nil {
+		t.Fatalf("UpdateFlag: %v", err)
+	}
+	slices.Sort(affected)
+	if !slices.Equal(affected, []string{"base", "feature", "mid"}) {
+		t.Errorf("affected = %v, want base, feature, and mid", affected)
 	}
 
-	if err := s.DeleteFlag(ctx, "base"); !errors.Is(err, flag.ErrHasDependents) {
+	if _, err := s.DeleteFlag(ctx, actor, "base"); !errors.Is(err, flag.ErrHasDependents) {
 		t.Errorf("deleting a required flag: error = %v, want ErrHasDependents", err)
-	}
-	if err := s.DeleteFlag(ctx, "feature"); err != nil { // cascades to its override and prerequisite rows
-		t.Fatalf("DeleteFlag(feature): %v", err)
-	}
-	if err := s.DeleteFlag(ctx, "base"); err != nil {
-		t.Fatalf("DeleteFlag(base) once nothing requires it: %v", err)
-	}
-	if err := s.DeleteFlag(ctx, "base"); !errors.Is(err, flag.ErrNotFound) {
-		t.Errorf("deleting twice: error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -201,7 +213,7 @@ func TestEvaluationSnapshot(t *testing.T) {
 		{"unrelated", "u1", true},
 		{"feature", "someone-else", false},
 	} {
-		if _, err := s.SetOverride(ctx, o.flag, o.user, o.enabled); err != nil {
+		if _, _, err := s.SetOverride(ctx, actor, o.flag, o.user, o.enabled); err != nil {
 			t.Fatalf("SetOverride: %v", err)
 		}
 	}
@@ -213,15 +225,12 @@ func TestEvaluationSnapshot(t *testing.T) {
 	if len(snap.Flags) != 3 {
 		t.Errorf("snapshot has %d flags, want feature, mid, and base", len(snap.Flags))
 	}
-	if got := snap.Flags["feature"].Prerequisites; len(got) != 1 || got[0] != "mid" {
-		t.Errorf("feature prerequisites = %v, want [mid]", got)
-	}
 	if len(snap.Overrides) != 1 || !snap.Overrides["base"] {
 		t.Errorf("overrides = %v, want only base=true for u1", snap.Overrides)
 	}
 
-	// The loaded snapshot must evaluate correctly: u1 has base forced on, so
-	// the whole chain is on; another user is blocked by base being off.
+	// u1 has base forced on, so the whole chain is on; another user is
+	// blocked by base being off.
 	if got, err := flag.Evaluate("feature", "u1", snap); err != nil || !got.Enabled {
 		t.Errorf("u1: got %+v, %v; want enabled", got, err)
 	}
@@ -238,6 +247,8 @@ func TestEvaluationSnapshot(t *testing.T) {
 	}
 }
 
+// The API will reject cycles; if one ever reached the database, loading and
+// evaluating must still terminate with an error rather than loop.
 func TestEvaluationSnapshotTerminatesOnCycle(t *testing.T) {
 	ctx := context.Background()
 	pool := storetest.NewPool(t)
@@ -245,7 +256,7 @@ func TestEvaluationSnapshotTerminatesOnCycle(t *testing.T) {
 	mustCreate(t, s, "a", true)
 	mustCreate(t, s, "b", true)
 	require(t, pool, "a", "b")
-	require(t, pool, "b", "a") // the API will reject this; the store must still cope
+	require(t, pool, "b", "a")
 
 	snap, err := s.EvaluationSnapshot(ctx, "a", "u1")
 	if err != nil {

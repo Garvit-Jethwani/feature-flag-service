@@ -8,6 +8,10 @@ services:
       API_KEYS: ${API_KEYS:?run "make env" to create .env}
       PORT: "8080"
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      CACHE_TTL: ${CACHE_TTL:-60s}
+      CACHE_MAX_ENTRIES: ${CACHE_MAX_ENTRIES:-100000}
+      RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-100}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-200}
     ports:
       # Reachable from this machine only.
       - "127.0.0.1:${PORT:-8080}:8080"

@@ -12,7 +12,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Garvit-Jethwani/feature-flag-service/internal/cache"
 	"github.com/Garvit-Jethwani/feature-flag-service/internal/service"
 	"github.com/Garvit-Jethwani/feature-flag-service/internal/store"
 	"github.com/Garvit-Jethwani/feature-flag-service/internal/store/storetest"
@@ -41,6 +45,12 @@ type testServer struct {
 	t    *testing.T
 	srv  *httptest.Server
 	logs *lockedBuffer
+	pool *pgxpool.Pool // nil for servers without a database
+}
+
+// newTestCache returns a cache like the production one.
+func newTestCache() *cache.Memory {
+	return cache.NewMemory(time.Minute, 1000)
 }
 
 // response is a decoded API response.
@@ -77,11 +87,14 @@ func startServer(t *testing.T, handler func(logger *slog.Logger) http.Handler) *
 // skipped when no test database is configured.
 func newDatabaseServer(t *testing.T) *testServer {
 	t.Helper()
-	flagStore := store.New(storetest.NewPool(t))
+	pool := storetest.NewPool(t)
+	flagStore := store.New(pool)
 	auth := testAuthenticator(t)
-	return startServer(t, func(logger *slog.Logger) http.Handler {
-		return New(service.New(flagStore, logger), auth, logger, flagStore.Ping)
+	s := startServer(t, func(logger *slog.Logger) http.Handler {
+		return New(service.New(flagStore, newTestCache(), logger), auth, logger, flagStore.Ping)
 	})
+	s.pool = pool
+	return s
 }
 
 // newStorelessServer runs the HTTP layer with no store, for requests that
@@ -90,7 +103,7 @@ func newStorelessServer(t *testing.T, ready func(context.Context) error) *testSe
 	t.Helper()
 	auth := testAuthenticator(t)
 	return startServer(t, func(logger *slog.Logger) http.Handler {
-		return New(service.New(nil, logger), auth, logger, ready)
+		return New(service.New(nil, newTestCache(), logger), auth, logger, ready)
 	})
 }
 

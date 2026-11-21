@@ -1,8 +1,8 @@
-# Plan 02: Evaluation cache and audit trail
+# Plan 02: Evaluation cache, audit trail, and rate limiting
 
-Status: Draft
+Status: Implemented. Approved by the owner on 21 Nov 2026: points 1 and 2 confirmed. On point 3 the owner asked for the reasoning, which is recorded below; the policy is isolated in one function so it can be changed. Part 3 (rate limiting) was added at the owner's request.
 
-Covers F3 (cached evaluation with an explained invalidation strategy) and F4 (audit trail) from `SPECS.md`. Design reasoning is in `docs/discovery.md` sections 4.3 to 4.7. Budget: 20 minutes.
+Covers F3 (cached evaluation with an explained invalidation strategy), F4 (audit trail), and X5 (rate limiting) from `SPECS.md`. Design reasoning is in `docs/discovery.md` sections 4.3 to 4.7 and 8.5. Budget: 20 minutes, plus about 10 for rate limiting.
 
 ## Outcome
 
@@ -18,6 +18,14 @@ Covers F3 (cached evaluation with an explained invalidation strategy) and F4 (au
 | 1 | Who may read the audit trail? | **Admin keys only.** Entries contain actor names and the user IDs of overrides. |
 | 2 | Is a change that changes nothing audited? | **No.** A `PATCH` that sets `enabled` to its current value returns `200`, writes no audit entry, and leaves the cache alone, because no state changed. |
 | 3 | What happens when the cache is full? | **Remove one arbitrary entry** to make room. Simple and bounded; a least-recently-used policy is more code for little gain here. |
+
+Why arbitrary eviction (point 3):
+
+- The entry limit is a safety cap, not the normal way entries leave. Normally they expire by TTL or are dropped when their flag changes.
+- A poor eviction costs one extra database query for that user. It can never produce a wrong answer.
+- Least-recently-used needs a linked list beside the map and must update it on every read, so reads would take a write lock; dropping a whole flag would mean unlinking each entry. That is more code on the hottest path for a case that is rarely reached.
+- Go starts map iteration at a random position, so "arbitrary" is in effect random eviction, a standard policy.
+- Cost accepted: a frequently used entry can be evicted while a rarely used one stays.
 
 ## Part 1: cache
 
@@ -115,10 +123,25 @@ If any step fails, the change and the audit entry are both rolled back, so they 
 
 Entry shape: `{"id", "flag", "action", "actor", "previous", "new", "occurred_at"}`.
 
+## Part 3: rate limiting
+
+- One token bucket per API key, held in memory. Each request with a valid key takes one token; tokens refill at a steady rate up to a burst size.
+- When a key has no tokens left the service answers `429` with code `rate_limited` and a `Retry-After` header in seconds.
+- The check runs right after the key is authenticated, before any database work.
+- Requests without a valid key are not counted: they are rejected with `401` after a hash comparison and never reach the database. Health checks are not limited.
+- Buckets are created at startup, one per configured key, so the limiter's memory does not grow with traffic.
+- Limits are per instance, the same caveat as the in-process cache.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `RATE_LIMIT_RPS` | Sustained requests per second allowed per API key. `0` disables rate limiting. | `100` |
+| `RATE_LIMIT_BURST` | Requests a key may make at once before the steady rate applies. | `200` |
+
 ## Files
 
 | Path | Change |
 |---|---|
+| `internal/httpapi/ratelimit.go` | New: token bucket, used by the auth middleware |
 | `internal/cache/cache.go` | New: in-process cache |
 | `internal/flag/audit.go` | New: audit entry type and action names |
 | `internal/store/migrations/0002_audit.sql` | New: `audit_log` table |
@@ -140,6 +163,7 @@ Kept deliberately small, on the paths where a mistake would matter.
 | Cache over HTTP | yes | `MISS` then `HIT`; a flag update, an override, and a delete each cause the next evaluation to be a `MISS` with the new answer; `no-cache` gives `BYPASS`; `404` is not cached |
 | Dependent invalidation | yes | changing a prerequisite flag drops the cached result of the flag that requires it |
 | Audit over HTTP | yes | create, update, override, and delete each add one entry with the right actor, previous, and new values; a no-op update adds none; entries survive deletion; a reader key gets `403` |
+| Rate limit | no | a burst is allowed, the next request gets `429` with `Retry-After`, tokens refill with time, and each key has its own bucket |
 
 ## Verification
 
@@ -152,3 +176,4 @@ Kept deliberately small, on the paths where a mistake would matter.
 1. `feat:` in-process cache with tests
 2. `feat:` audit trail in the write transactions, with audit endpoints
 3. `feat:` cached evaluation with invalidation and the `X-Cache` header
+4. `feat:` per-key rate limiting

@@ -42,7 +42,7 @@ Time box: about 3 hours in total, including review. Language: Go.
 | X2 | **Percentage rollout.** Enable a flag for a percentage of users using a deterministic hash of the user ID. |
 | X3 | **Flag dependencies.** A flag can require another flag to be enabled before it evaluates to true. |
 | X4 | **Observability and monitoring.** Metrics, logs, and alerting for the running service. Added by the owner as a consideration, not part of the original problem statement; whether to implement it is decided at the end. Options are in `docs/discovery.md` section 8.4. |
-| X5 | **Rate limiting.** Limit requests per API key and answer `429` when exceeded. Raised by the owner; not part of the original problem statement and not needed for the required scope. Decided at the end; options are in `docs/discovery.md` section 8.5. |
+| X5 | **Rate limiting.** Limit requests per API key and answer `429` when exceeded. Raised by the owner; not part of the original problem statement. Accepted by the owner as an in-process token bucket per API key, built in plan 02; options are in `docs/discovery.md` section 8.5. |
 
 ## 3. Owner's take
 
@@ -123,7 +123,8 @@ Notes:
 **Known limits, to be stated in the README:**
 
 - With the in-process cache, each instance has its own cache, so a write on one instance is seen by others only after the TTL. A shared Redis cache removes this (D2).
-- Results grow with flags times active users, so the cache has a configurable cap on entries.
+- Results grow with flags times active users, so the cache has a configurable cap on entries. When the cap is reached, one arbitrary entry is removed to make room; this costs at most one extra database query and never a wrong answer.
+- Between a write's commit and its invalidation (microseconds, in the same process), a concurrent evaluation can still be answered with the old cached value.
 
 **Stale write-back guard:** a read that started before a write could store its old result just after the invalidation. Each invalidation bumps a generation counter, and a read stores its result only if the generation is unchanged since before it queried the database.
 
@@ -152,7 +153,7 @@ flowchart TD
 
 ## 8. API surface (draft)
 
-All routes are under `/v1` and require `Authorization: Bearer <key>`, except the health checks. `GET` routes accept either role; every other method requires the `admin` role. Whether `reader` keys may read the audit log is settled in the phase 2 plan.
+All routes are under `/v1` and require `Authorization: Bearer <key>`, except the health checks. `GET` routes accept either role; every other method requires the `admin` role. The audit endpoints are the exception: they are `GET` routes but require `admin`, because entries name actors and overridden users. Each API key has its own rate limit; a key that exceeds it gets `429` with `Retry-After`.
 
 | Method and path | Purpose | Success | Notable errors |
 |---|---|---|---|
@@ -164,11 +165,11 @@ All routes are under `/v1` and require `Authorization: Bearer <key>`, except the
 | `PUT /v1/flags/{name}/overrides/{userID}` | Set a per-user override | `200` | `400`, `404` |
 | `DELETE /v1/flags/{name}/overrides/{userID}` | Remove a per-user override | `204` | `404` |
 | `GET /v1/flags/{name}/evaluate?user_id=U` | Evaluate the flag for a user | `200` | `400`, `404` |
-| `GET /v1/flags/{name}/audit` | Audit entries for one flag | `200` | |
-| `GET /v1/audit` | All audit entries, newest first | `200` | |
+| `GET /v1/flags/{name}/audit` | Audit entries for one flag, newest first; works for deleted flags (admin only) | `200` | `403`, `404` name never existed |
+| `GET /v1/audit` | All audit entries, newest first (admin only) | `200` | `403` |
 | `GET /healthz`, `GET /readyz` | Liveness and readiness | `200` | `503` when the database is unreachable |
 
-Errors use one JSON shape: `{"error": {"code": "flag_not_found", "message": "..."}}`. Missing or invalid credentials return `401`; a valid `reader` key on a write returns `403`.
+Errors use one JSON shape: `{"error": {"code": "flag_not_found", "message": "..."}}`. Missing or invalid credentials return `401`; a valid `reader` key on an admin-only route returns `403`; a key over its rate limit gets `429`.
 
 Evaluation response: `{"flag": "...", "user_id": "...", "enabled": true, "reason": "user_override"}`.
 
@@ -189,9 +190,9 @@ Evaluation response: `{"flag": "...", "user_id": "...", "enabled": true, "reason
 | `flags` | `name` (primary key), `description`, `enabled`, `rollout_percentage` (default 100), `created_at`, `updated_at` | |
 | `flag_overrides` | `flag_name`, `user_id`, `enabled` | Primary key (`flag_name`, `user_id`); removed with the flag |
 | `flag_prerequisites` | `flag_name`, `requires_flag` | Deleting a required flag is blocked |
-| `audit_log` | `id`, `flag_name`, `action`, `actor`, `previous` (JSON), `new` (JSON), `occurred_at` | No foreign key, so entries survive flag deletion |
+| `audit_log` | `id`, `flag_name`, `action`, `actor`, `previous_value` (JSON), `new_value` (JSON), `occurred_at` | No foreign key, so entries survive flag deletion |
 
-The audit row is written in the same transaction as the change it describes, so the two cannot disagree.
+The audit row is written in the same transaction as the change it describes, so the two cannot disagree. A request that changes nothing (for example, enabling a flag that is already enabled) succeeds but writes no audit row and does not invalidate the cache, because no state changed.
 
 ## 11. Production-readiness checklist
 
@@ -210,10 +211,10 @@ Each phase gets a plan in `plans/` that must be approved before work starts.
 |---|---|---|---|
 | 0 | Repository setup, `SPECS.md`, `AGENTS.md` | | done |
 | 1 | Domain model, evaluator with unit tests, Postgres store, flag CRUD, overrides, evaluation endpoint, validation, auth | F1, F2, F3 (uncached), E2, E3 (unit) | done |
-| 2 | Cache with invalidation, audit trail | F3, F4 | 20 min |
+| 2 | Cache with invalidation, audit trail, per-key rate limiting | F3, F4, X5 | done |
 | 3 | HTTP integration tests, GitHub Actions, Dockerfile, README, architecture diagram | E1, E3, E4, E5 | 20 min |
 | 4 | Percentage rollout and flag dependencies exposed through the API | X2, X3 | 20 min |
 | 5 | Deployment to DigitalOcean | X1 | 15 min |
-| 6 | Observability, monitoring, and rate limiting (optional) | X4, X5 | only if time remains |
+| 6 | Observability and monitoring (optional) | X4 | only if time remains |
 
 Phases 1 to 3 are the required scope and take priority. Phases 4 to 6 are extensions. Phase 6 is attempted only if time remains after the others; if time runs short before that, phase 5 (deployment) is dropped first.

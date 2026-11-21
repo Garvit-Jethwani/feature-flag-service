@@ -39,6 +39,10 @@ func New(svc *service.Service, auth *Authenticator, logger *slog.Logger, ready f
 	mux.Handle("DELETE /v1/flags/{name}/overrides/{userID}", auth.require(RoleAdmin, a.deleteOverride))
 	mux.Handle("GET /v1/flags/{name}/evaluate", auth.require(RoleReader, a.evaluate))
 
+	// The audit trail names actors and overridden users, so it is admin-only.
+	mux.Handle("GET /v1/audit", auth.require(RoleAdmin, a.listAudit))
+	mux.Handle("GET /v1/flags/{name}/audit", auth.require(RoleAdmin, a.flagAudit))
+
 	return observe(logger, recoverPanic(logger, route(mux)))
 }
 

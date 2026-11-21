@@ -15,7 +15,8 @@ const (
 
 func testAuthenticator(t *testing.T) *Authenticator {
 	t.Helper()
-	auth, err := NewAuthenticator("alice:admin:" + testAdminToken + ", checkout:reader:" + testReaderToken)
+	// A zero RateLimit disables rate limiting, so it cannot interfere.
+	auth, err := NewAuthenticator("alice:admin:"+testAdminToken+", checkout:reader:"+testReaderToken, RateLimit{})
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
@@ -41,7 +42,7 @@ func TestNewAuthenticatorRejectsBadSpecs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewAuthenticator(tt.spec)
+			_, err := NewAuthenticator(tt.spec, RateLimit{})
 			if err == nil {
 				t.Fatal("NewAuthenticator succeeded, want an error")
 			}
