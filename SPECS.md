@@ -124,32 +124,16 @@ Notes:
 
 - With the in-process cache, each instance has its own cache, so a write on one instance is seen by others only after the TTL. A shared Redis cache removes this (D2).
 - Results grow with flags times active users, so the cache has a configurable cap on entries. When the cap is reached, one arbitrary entry is removed to make room; this costs at most one extra database query and never a wrong answer.
+- Expired entries are removed when they are read again; there is no background sweep. A long-running instance with many one-time users therefore sits at the entry cap, and an eviction may drop a live entry while expired ones remain.
 - Between a write's commit and its invalidation (microseconds, in the same process), a concurrent evaluation can still be answered with the old cached value.
 
 **Stale write-back guard:** a read that started before a write could store its old result just after the invalidation. Each invalidation bumps a generation counter, and a read stores its result only if the generation is unchanged since before it queried the database.
 
 Responses carry an `X-Cache: HIT | MISS | BYPASS` header so the behaviour is observable and testable.
 
-### Evaluation request path (draft of E1)
+### Evaluation request path (E1)
 
-```mermaid
-flowchart TD
-    client["Client"] -->|"GET /v1/flags/NAME/evaluate?user_id=U"| handler["HTTP handler: auth and validation"]
-    handler -->|"invalid input"| bad["400"]
-    handler --> nocache{"Cache-Control: no-cache?"}
-    nocache -->|"no"| lookup{"Cache lookup: flag + user"}
-    nocache -->|"yes: bypass"| db
-    lookup -->|"hit"| respond["200 with result"]
-    lookup -->|"miss or cache error"| db[("Postgres: flag, override, prerequisites")]
-    db -->|"flag not found"| notfound["404, nothing cached"]
-    db --> evaluator["Evaluator: pure function"]
-    evaluator --> store["Store result in cache with TTL"]
-    store --> respond
-
-    writer["Any write: flag update or delete, override or prerequisite change"] --> tx[("Postgres transaction: change + audit row")]
-    tx -->|"after commit"| invalidate["Drop cached results for the flag and its dependents"]
-    invalidate -.-> lookup
-```
+The diagrams of the evaluation path and the write path are in [`docs/architecture.md`](docs/architecture.md), with a table of when the cache is consulted, bypassed, and invalidated.
 
 ## 8. API surface (draft)
 
@@ -212,7 +196,7 @@ Each phase gets a plan in `plans/` that must be approved before work starts.
 | 0 | Repository setup, `SPECS.md`, `AGENTS.md` | | done |
 | 1 | Domain model, evaluator with unit tests, Postgres store, flag CRUD, overrides, evaluation endpoint, validation, auth | F1, F2, F3 (uncached), E2, E3 (unit) | done |
 | 2 | Cache with invalidation, audit trail, per-key rate limiting | F3, F4, X5 | done |
-| 3 | HTTP integration tests, GitHub Actions, Dockerfile, README, architecture diagram | E1, E3, E4, E5 | 20 min |
+| 3 | HTTP integration tests, GitHub Actions, Dockerfile, README, architecture diagram | E1, E3, E4, E5 | done |
 | 4 | Percentage rollout and flag dependencies exposed through the API | X2, X3 | 20 min |
 | 5 | Deployment to DigitalOcean | X1 | 15 min |
 | 6 | Observability and monitoring (optional) | X4 | only if time remains |

@@ -142,11 +142,16 @@ func (c *Memory) remove(flagName, userID string) {
 // evictOne makes room by removing one arbitrary entry. The caller holds the
 // lock.
 //
-// Go starts map iteration at a random position, so this is in effect random
-// eviction. It is deliberately simple: the entry limit is a safety cap that
-// is rarely reached (entries normally leave by TTL or invalidation), and
-// evicting a useful entry only costs one extra database query, never a wrong
-// answer. A least-recently-used policy would need bookkeeping on every read.
+// Go starts map iteration at a random position, so the choice is
+// unpredictable, though not uniformly random: it picks a flag first, then a
+// user within it.
+//
+// It is deliberately simple. No entry is valid for longer than the TTL, so
+// evicting a useful one only costs one extra database query, never a wrong
+// answer. The known weakness: expired entries are only removed when read
+// again, so a busy cache can sit at the limit and this may drop a live entry
+// while expired ones remain. A least-recently-used policy would avoid that
+// at the price of a linked list updated on every read.
 func (c *Memory) evictOne() {
 	for flagName, users := range c.byFlag {
 		for userID := range users {

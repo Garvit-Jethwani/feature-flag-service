@@ -27,6 +27,8 @@ Why arbitrary eviction (point 3):
 - Go starts map iteration at a random position, so "arbitrary" is in effect random eviction, a standard policy.
 - Cost accepted: a frequently used entry can be evicted while a rarely used one stays.
 
+Correction after implementation (owner kept arbitrary eviction): two points above are wrong. The cache uses one plain mutex, so least-recently-used would not change locking; its cost is the extra list and a list move per hit. And the limit is not rarely reached: expired entries are only removed when read again, so a long-running instance can sit at the limit. See "Known limits" in `docs/architecture.md`.
+
 ## Part 1: cache
 
 ### What is stored
