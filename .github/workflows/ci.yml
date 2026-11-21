@@ -1,0 +1,75 @@
+# Runs on every push and pull request: formatting, vet, the full test suite
+# against a real Postgres, and a build of the Docker image.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+# The workflow only needs to read the code.
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the run that is still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      # Same major version as docker-compose.yml. Trust authentication means
+      # there is no password to store: the database lives only for this job
+      # and is reachable only from this runner.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+
+    env:
+      # Database-backed tests create one schema per test in this database.
+      # GitHub sets CI=true, which makes those tests fail rather than skip
+      # if this variable is ever missing.
+      TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 -v ./...
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Proves the Dockerfile still builds. The image is not pushed anywhere.
+      - name: Build image
+        run: docker build -t feature-flag-service:ci .
