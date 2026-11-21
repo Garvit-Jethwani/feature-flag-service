@@ -1,6 +1,6 @@
 # Plan 06: Minimal observability
 
-Status: Approved by the owner on 21 Nov 2026 ("a minute version of observability, and a separate doc on how it can be extended"). Implementation in progress.
+Status: Implemented. Approved by the owner on 21 Nov 2026 ("a minute version of observability, and a separate doc on how it can be extended").
 
 Covers X4 from `SPECS.md` in its smallest useful form. Budget: 10 minutes.
 

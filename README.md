@@ -11,6 +11,7 @@ Written in Go with the standard library HTTP server and PostgreSQL. The only thi
 | [`SPECS.md`](SPECS.md) | Requirements, decisions, rules. The source of truth. |
 | [`docs/architecture.md`](docs/architecture.md) | Diagrams of the evaluation and write paths; where the cache sits. |
 | [`docs/discovery.md`](docs/discovery.md) | Options considered and trade-offs. |
+| [`docs/next-steps.md`](docs/next-steps.md) | Observability, and what to improve next. |
 | [`plans/`](plans) | One plan per phase, approved before it was built. |
 
 ## Setup
@@ -66,7 +67,7 @@ An evaluation response:
 
 ## API
 
-All `/v1` routes need `Authorization: Bearer <key>`. Bodies are JSON.
+All `/v1` routes and `/metrics` need `Authorization: Bearer <key>`. Bodies are JSON.
 
 | Method and path | Role | Purpose | Success | Errors |
 |---|---|---|---|---|
@@ -80,9 +81,10 @@ All `/v1` routes need `Authorization: Bearer <key>`. Bodies are JSON.
 | `GET /v1/flags/{name}/evaluate?user_id=U` | reader | Is the flag on for this user? | `200` | `400`, `404` |
 | `GET /v1/flags/{name}/audit` | admin | Audit entries for one flag, newest first; page with `limit` and `before` | `200` | `404` name never existed |
 | `GET /v1/audit` | admin | Audit entries for all flags, newest first | `200` | |
+| `GET /metrics` | reader | Metrics in Prometheus text format | `200` | |
 | `GET /healthz`, `GET /readyz` | none | Liveness; readiness (checks the database) | `200` | `503` |
 
-"reader" means either role works. Any `/v1` route can also answer `401` (no key or a wrong key), `403` (a reader key on an admin route), and `429` (rate limit).
+"reader" means either role works. Any route that needs a key can also answer `401` (no key or a wrong key), `403` (a reader key on an admin route), and `429` (rate limit).
 
 Errors always have the same shape, and a missing flag is `404`, never `500`:
 
@@ -221,6 +223,31 @@ make test-unit  # no database needed; database-backed tests are skipped
 | Store tests | `internal/store/store_test.go` | Queries, transactions, audit rows, migrations |
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push: a `gofmt` check, `go vet`, `go test -race` against a Postgres service container, and a Docker image build. In CI, database-backed tests fail rather than skip if the database is missing.
+
+## Observability
+
+- **Logs:** one JSON line per request on stdout with a request ID, the route pattern, status, duration, and actor. The same ID is returned to the client in `X-Request-ID`.
+- **Metrics:** `GET /metrics` in Prometheus text format: requests by route and status, time spent per route, cache hits, misses and bypasses, and the number of cached results.
+- **Health:** `GET /healthz` and `GET /readyz`.
+
+```sh
+curl -s $B/metrics -H "Authorization: Bearer $READER"
+```
+
+What these are for, and how to extend them (percentiles, dashboards, tracing, alerts), is in [`docs/next-steps.md`](docs/next-steps.md), together with the other improvements left out of this build.
+
+## Deployment
+
+The service runs on DigitalOcean: **https://feature-flag-service-ey3u3.ondigitalocean.app**
+
+```sh
+curl -s https://feature-flag-service-ey3u3.ondigitalocean.app/readyz
+```
+
+- **App Platform** builds the `Dockerfile` from this repository and runs one instance behind HTTPS. The spec is [`deploy/app.yaml`](deploy/app.yaml).
+- **Managed PostgreSQL 17** holds the data. The connection requires TLS.
+- **Secrets** (the database URL and the API keys) are stored encrypted by App Platform. The production API keys exist only there and in `.env.production` on the machine that deployed; they are not in this repository, so the `/v1` routes of the live service need keys from the owner.
+- What was created, how it was verified, and how to delete it: [`plans/05-deploy-digitalocean.md`](plans/05-deploy-digitalocean.md).
 
 ## Production notes
 

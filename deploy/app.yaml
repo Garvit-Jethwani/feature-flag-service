@@ -1,7 +1,8 @@
 # DigitalOcean App Platform spec. See plans/05-deploy-digitalocean.md.
 #
-# This file contains no secrets. __API_KEYS__ is replaced at deploy time with
-# keys generated on the deploying machine; App Platform stores them encrypted.
+# This file contains no secrets. The two placeholders in double underscores
+# are replaced at deploy time, in a copy that is never committed; App Platform
+# stores both values encrypted.
 name: feature-flag-service
 region: blr
 
@@ -22,14 +23,16 @@ services:
       initial_delay_seconds: 5
       period_seconds: 10
     envs:
-      # Filled in by App Platform from the attached database, TLS required.
+      # Connection string of the Managed PostgreSQL cluster (TLS required),
+      # read from the DigitalOcean API at deploy time and stored encrypted.
       - key: DATABASE_URL
         scope: RUN_TIME
-        value: ${db.DATABASE_URL}
+        type: SECRET
+        value: "__DATABASE_URL__"
       - key: API_KEYS
         scope: RUN_TIME
         type: SECRET
-        value: __API_KEYS__
+        value: "__API_KEYS__"
       - key: LOG_LEVEL
         scope: RUN_TIME
         value: info
@@ -47,12 +50,10 @@ services:
         value: 80
         window: FIVE_MINUTES
 
-# An existing Managed PostgreSQL cluster, created before the app.
-databases:
-  - name: db
-    engine: PG
-    production: true
-    cluster_name: feature-flag-service-db
+# The database is the Managed PostgreSQL cluster "feature-flag-service-db".
+# It is not listed here as an attached database: this account's quota makes
+# App Platform reject the attachment (see plans/05-deploy-digitalocean.md),
+# so the app receives the connection string as a secret instead.
 
 alerts:
   - rule: DEPLOYMENT_FAILED

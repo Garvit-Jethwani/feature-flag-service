@@ -41,7 +41,7 @@ Time box: about 3 hours in total, including review. Language: Go.
 | X1 | **Deployment** to DigitalOcean. |
 | X2 | **Percentage rollout.** Enable a flag for a percentage of users using a deterministic hash of the user ID. |
 | X3 | **Flag dependencies.** A flag can require another flag to be enabled before it evaluates to true. |
-| X4 | **Observability and monitoring.** Metrics, logs, and alerting for the running service. Added by the owner as a consideration, not part of the original problem statement; whether to implement it is decided at the end. Options are in `docs/discovery.md` section 8.4. |
+| X4 | **Observability and monitoring.** Metrics, logs, and alerting for the running service. Added by the owner, not part of the original problem statement. Built in its smallest useful form in plan 06: a Prometheus-format `/metrics` endpoint next to the existing JSON logs and health checks, plus platform alerts. How to extend it is in `docs/next-steps.md`. |
 | X5 | **Rate limiting.** Limit requests per API key and answer `429` when exceeded. Raised by the owner; not part of the original problem statement. Accepted by the owner as an in-process token bucket per API key, built in plan 02; options are in `docs/discovery.md` section 8.5. |
 
 ## 3. Owner's take
@@ -73,7 +73,7 @@ The options, trade-offs, and reasoning behind each decision are in [`docs/discov
 | D4 | Prerequisites versus overrides | **Prerequisites are a hard gate.** If any prerequisite is off for the user, the flag is off, even with a per-user override of `true`. | Override wins over everything, including prerequisites. | Accepted |
 | D5 | HTTP stack | **Standard library `net/http`** (method and path patterns), `log/slog` for logs, `pgx` for Postgres. | A router framework such as chi or gin. | Assumed (default, no objection raised) |
 | D6 | Flag identity | **The name is the identifier and is immutable.** Lowercase letters, digits, `.`, `_`, `-`; starts with a letter or digit; 1 to 64 characters. | Mixed case (invites `Dark-Mode` versus `dark-mode` confusion); separate numeric IDs. | Assumed (default, no objection raised) |
-| D7 | Deployment target | **DigitalOcean App Platform** with Managed PostgreSQL, one instance, for HTTPS and health checks without server upkeep. | A droplet running Docker Compose (no TLS without a domain). | Accepted |
+| D7 | Deployment target | **DigitalOcean App Platform** with Managed PostgreSQL, one instance, for HTTPS and health checks without server upkeep. Deployed in plan 05 at https://feature-flag-service-ey3u3.ondigitalocean.app. | A droplet running Docker Compose (no TLS without a domain). | Accepted |
 | D8 | What the cache holds | **Evaluation results per (flag, user)**, grouped by flag, with a size cap. | Flag snapshots per flag, evaluated on every request. | Accepted |
 | D9 | Integration test database | **Real PostgreSQL**: Docker Compose locally, a service container in CI. | In-memory fake store; Testcontainers. | Accepted |
 
@@ -137,7 +137,7 @@ The diagrams of the evaluation path and the write path are in [`docs/architectur
 
 ## 8. API surface (draft)
 
-All routes are under `/v1` and require `Authorization: Bearer <key>`, except the health checks. `GET` routes accept either role; every other method requires the `admin` role. The audit endpoints are the exception: they are `GET` routes but require `admin`, because entries name actors and overridden users. Each API key has its own rate limit; a key that exceeds it gets `429` with `Retry-After`.
+All routes are under `/v1`, except `/metrics` and the health checks. Every route requires `Authorization: Bearer <key>` except the health checks. `GET` routes accept either role; every other method requires the `admin` role. The audit endpoints are the exception: they are `GET` routes but require `admin`, because entries name actors and overridden users. Each API key has its own rate limit; a key that exceeds it gets `429` with `Retry-After`.
 
 | Method and path | Purpose | Success | Notable errors |
 |---|---|---|---|
@@ -151,6 +151,7 @@ All routes are under `/v1` and require `Authorization: Bearer <key>`, except the
 | `GET /v1/flags/{name}/evaluate?user_id=U` | Evaluate the flag for a user | `200` | `400`, `404` |
 | `GET /v1/flags/{name}/audit` | Audit entries for one flag, newest first; works for deleted flags (admin only) | `200` | `403`, `404` name never existed |
 | `GET /v1/audit` | All audit entries, newest first (admin only) | `200` | `403` |
+| `GET /metrics` | Metrics in Prometheus text format (either role) | `200` | `401` |
 | `GET /healthz`, `GET /readyz` | Liveness and readiness | `200` | `503` when the database is unreachable |
 
 Errors use one JSON shape: `{"error": {"code": "flag_not_found", "message": "..."}}`. Missing or invalid credentials return `401`; a valid `reader` key on an admin-only route returns `403`; a key over its rate limit gets `429`.
@@ -199,7 +200,7 @@ Each phase gets a plan in `plans/` that must be approved before work starts.
 | 2 | Cache with invalidation, audit trail, per-key rate limiting | F3, F4, X5 | done |
 | 3 | HTTP integration tests, GitHub Actions, Dockerfile, README, architecture diagram | E1, E3, E4, E5 | done |
 | 4 | Percentage rollout and flag dependencies exposed through the API | X2, X3 | done |
-| 5 | Deployment to DigitalOcean | X1 | 15 min |
-| 6 | Observability and monitoring (optional) | X4 | only if time remains |
+| 5 | Deployment to DigitalOcean | X1 | done |
+| 6 | Minimal observability: metrics endpoint, platform alerts, next-steps document | X4 | done |
 
-Phases 1 to 3 are the required scope and take priority. Phases 4 to 6 are extensions. Phase 6 is attempted only if time remains after the others; if time runs short before that, phase 5 (deployment) is dropped first.
+Phases 1 to 3 are the required scope. Phases 4 to 6 are extensions; all were completed. What was left out on purpose is listed in `docs/next-steps.md`.
